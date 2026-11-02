@@ -156,6 +156,14 @@ function broadcastGameState(roomCode: string) {
 
 const PORT = process.env.PORT || 3001;
 
+// Check turn timeouts every 500ms (PlaySettlr auto-roller / auto-pass)
+setInterval(() => {
+  const timedOutRooms = roomManager.checkTurnTimeouts();
+  for (const code of timedOutRooms) {
+    broadcastGameState(code);
+  }
+}, 500);
+
 // SPA fallback
 if (fs.existsSync(clientDist)) {
   app.get('*', (req, res) => {

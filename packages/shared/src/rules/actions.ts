@@ -1,15 +1,20 @@
 import {
   BoardState,
-  Harbor,
   GameState,
   ResourceCount,
   ResourceType,
-  DevCardType,
   TradeOffer,
   CounterOffer,
 } from '../types/index.js';
 import { BUILDING_COSTS, canAfford, deductCost, addResources } from './costs.js';
-import { satisfiesDistanceRule, getAdjacentVertices, syncPlayerVPs, getPairedPlayerId } from './engine.js';
+import {
+  satisfiesDistanceRule,
+  syncPlayerVPs,
+  getPairedPlayerId,
+  refreshTurnTimer,
+  isValidRoadEdge,
+  isValidSettlementVertex,
+} from './engine.js';
 import { updateLongestRouteOwner } from './longestRoute.js';
 
 export type GameAction =
@@ -28,11 +33,11 @@ export type GameAction =
       playerId: string;
       cardId: string;
       options?: {
-        hexId?: string; // for knight
-        targetPlayerId?: string; // for knight steal
-        freeRoadEdges?: [string, string]; // for road building
-        yearOfPlentyResources?: [ResourceType, ResourceType]; // for year of plenty
-        monopolyResource?: ResourceType; // for monopoly
+        hexId?: string;
+        targetPlayerId?: string;
+        freeRoadEdges?: [string, string];
+        yearOfPlentyResources?: [ResourceType, ResourceType];
+        monopolyResource?: ResourceType;
       };
     }
   | { type: 'MARITIME_TRADE'; playerId: string; giving: ResourceType; asking: ResourceType; ratio: number }
@@ -74,12 +79,14 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
       if (action.playerId !== currentSetupPlayerId) {
         return { success: false, error: 'Not your turn in setup.' };
       }
-
-      if (!satisfiesDistanceRule(action.vertexId, state.board)) {
-        return { success: false, error: 'Does not satisfy distance rule.' };
+      if (state.lastSetupVertexId !== null) {
+        return { success: false, error: 'You already placed your settlement. Now place a road attached to it!' };
       }
 
-      // Build settlement
+      if (!satisfiesDistanceRule(action.vertexId, state.board)) {
+        return { success: false, error: 'Violates Distance Rule: must be at least 2 edges away from any settlement.' };
+      }
+
       state.board.buildings[action.vertexId] = {
         id: `b_${action.vertexId}`,
         type: 'settlement',
@@ -87,8 +94,8 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
         vertexId: action.vertexId,
       };
       player.settlementsLeft--;
+      state.lastSetupVertexId = action.vertexId;
 
-      // If in Round 2, grant starting resources from adjacent non-desert hexes
       if (state.phase === 'SETUP_ROUND_2') {
         const vertex = state.board.vertices[action.vertexId];
         if (vertex) {
@@ -103,7 +110,7 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
       }
 
       state.actionLog.push({
-        id: `log_${Date.now()}`,
+        id: `log_${Date.now()}_${Math.random()}`,
         timestamp: Date.now(),
         playerId: player.id,
         message: `${player.name} placed a starting settlement.`,
@@ -122,6 +129,9 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
       if (action.playerId !== currentSetupPlayerId) {
         return { success: false, error: 'Not your turn in setup.' };
       }
+      if (!state.lastSetupVertexId) {
+        return { success: false, error: 'Place your starting settlement first!' };
+      }
 
       const edge = state.board.edges[action.edgeId];
       if (!edge) return { success: false, error: 'Invalid edge.' };
@@ -129,27 +139,39 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
         return { success: false, error: 'Road already exists here.' };
       }
 
-      // In setup, road must attach to the player's settlement
-      const v1Building = state.board.buildings[edge.v1];
-      const v2Building = state.board.buildings[edge.v2];
-      const touchesOwnSettlement =
-        (v1Building && v1Building.playerId === action.playerId) ||
-        (v2Building && v2Building.playerId === action.playerId);
+      // In setup, road MUST connect directly to the settlement just placed (state.lastSetupVertexId)
+      const connectsToLastSettlement =
+        edge.v1 === state.lastSetupVertexId || edge.v2 === state.lastSetupVertexId;
 
-      if (!touchesOwnSettlement) {
-        return { success: false, error: 'Road must connect to your settlement.' };
+      if (!connectsToLastSettlement) {
+        return {
+          success: false,
+          error: 'Starting road must connect directly to the settlement you just placed!',
+        };
       }
 
-      // Build road
       state.board.roads[action.edgeId] = {
         id: `r_${action.edgeId}`,
         playerId: action.playerId,
         edgeId: action.edgeId,
       };
       player.roadsLeft--;
+      state.lastSetupVertexId = null;
+
+      // Recalculate Longest Route
+      const { newOwnerId, playerLengths } = updateLongestRouteOwner(
+        state.board,
+        state.longestRouteOwnerId,
+        Object.keys(state.players),
+      );
+      state.longestRouteOwnerId = newOwnerId;
+      for (const [pid, p] of Object.entries(state.players)) {
+        p.longestRouteLength = playerLengths[pid] || 0;
+        p.hasLongestRoute = pid === newOwnerId;
+      }
 
       state.actionLog.push({
-        id: `log_${Date.now()}`,
+        id: `log_${Date.now()}_${Math.random()}`,
         timestamp: Date.now(),
         playerId: player.id,
         message: `${player.name} placed a starting road.`,
@@ -167,19 +189,19 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
         state.phase = 'SETUP_ROUND_2';
         state.currentTurnPlayerId = state.setupTurnOrder[state.setupTurnIndex];
       } else {
-        // Setup finished! Regular turns begin
         state.phase = 'TURN_START';
         state.currentTurnPlayerId = state.setupTurnOrder[0];
         state.turnNumber = 1;
         state.diceRolledThisTurn = false;
         state.actionLog.push({
-          id: `log_${Date.now()}`,
+          id: `log_${Date.now()}_${Math.random()}`,
           timestamp: Date.now(),
-          message: 'Setup complete! The match begins.',
+          message: 'Setup complete! Roll the dice to begin.',
           category: 'system',
         });
       }
 
+      refreshTurnTimer(state);
       syncPlayerVPs(state);
       return { success: true };
     }
@@ -199,18 +221,18 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
       const d2 = Math.floor(Math.random() * 6) + 1;
       const sum = d1 + d2;
       state.diceRoll = [d1, d2];
+      state.lastDiceRollAt = Date.now();
       state.diceRolledThisTurn = true;
 
       state.actionLog.push({
-        id: `log_${Date.now()}`,
+        id: `log_${Date.now()}_${Math.random()}`,
         timestamp: Date.now(),
         playerId: player.id,
-        message: `${player.name} rolled a ${sum} (${d1} + ${d2}).`,
+        message: `${player.name} rolled ${sum} (${d1} + ${d2}).`,
         category: 'dice',
       });
 
       if (sum === 7) {
-        // Check discards
         const discards: Record<string, number> = {};
         for (const p of Object.values(state.players)) {
           const totalCards = Object.values(p.resources).reduce((s, n) => s + n, 0);
@@ -223,39 +245,63 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
           state.phase = 'DISCARD_PHASE';
           state.pendingDiscards = discards;
           state.actionLog.push({
-            id: `log_${Date.now()}`,
+            id: `log_${Date.now()}_${Math.random()}`,
             timestamp: Date.now(),
-            message: `A 7 was rolled! Players with more than 7 cards must discard half their hand.`,
+            message: `A 7 was rolled! Players with >7 cards must discard half.`,
             category: 'robber',
           });
         } else {
           state.phase = 'ROBBER_PLACEMENT';
         }
       } else {
-        // Distribute resources for rolled number
+        // Check resource distribution (official shortage rule: if bank lacks enough for all players owed that resource, no one gets it unless only 1 player is owed)
+        const owedByResource: Record<ResourceType, Record<string, number>> = {
+          wood: {},
+          brick: {},
+          wheat: {},
+          sheep: {},
+          ore: {},
+        };
+
         for (const hex of Object.values(state.board.hexes)) {
           if (hex.number === sum && !hex.hasRobber && hex.resource) {
-            // Find all vertices touching this hex
             for (const vertex of Object.values(state.board.vertices)) {
               if (vertex.hexCoords.includes(hex.id)) {
                 const b = state.board.buildings[vertex.id];
                 if (b) {
-                  const bPlayer = state.players[b.playerId];
                   const count = b.type === 'city' ? 2 : 1;
-                  const available = state.resourceBank[hex.resource];
-                  const given = Math.min(count, available);
-                  if (given > 0) {
-                    bPlayer.resources[hex.resource] += given;
-                    state.resourceBank[hex.resource] -= given;
-                  }
+                  owedByResource[hex.resource][b.playerId] =
+                    (owedByResource[hex.resource][b.playerId] || 0) + count;
                 }
               }
             }
           }
         }
+
+        for (const [res, playerAmounts] of Object.entries(owedByResource) as Array<
+          [ResourceType, Record<string, number>]
+        >) {
+          const entries = Object.entries(playerAmounts);
+          if (entries.length === 0) continue;
+          const totalNeeded = entries.reduce((s, [_, amt]) => s + amt, 0);
+          const available = state.resourceBank[res];
+
+          if (available >= totalNeeded) {
+            for (const [pid, amt] of entries) {
+              state.players[pid].resources[res] += amt;
+              state.resourceBank[res] -= amt;
+            }
+          } else if (entries.length === 1 && available > 0) {
+            const [pid] = entries[0];
+            state.players[pid].resources[res] += available;
+            state.resourceBank[res] = 0;
+          }
+        }
+
         state.phase = 'ACTION_PHASE';
       }
 
+      refreshTurnTimer(state);
       syncPlayerVPs(state);
       return { success: true };
     }
@@ -283,16 +329,16 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
       delete state.pendingDiscards[action.playerId];
 
       state.actionLog.push({
-        id: `log_${Date.now()}`,
+        id: `log_${Date.now()}_${Math.random()}`,
         timestamp: Date.now(),
         playerId: player.id,
         message: `${player.name} discarded ${needed} cards.`,
         category: 'robber',
       });
 
-      // If all discards done, advance to robber placement
       if (Object.keys(state.pendingDiscards).length === 0) {
         state.phase = 'ROBBER_PLACEMENT';
+        refreshTurnTimer(state);
       }
 
       syncPlayerVPs(state);
@@ -303,7 +349,9 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
       if (state.phase !== 'ROBBER_PLACEMENT') {
         return { success: false, error: 'Not in robber placement phase.' };
       }
-      if (action.playerId !== state.currentTurnPlayerId) {
+      const isActiveController =
+        action.playerId === state.currentTurnPlayerId || action.playerId === state.pairedPlayerId;
+      if (!isActiveController) {
         return { success: false, error: 'Not your turn to move the robber.' };
       }
       if (action.hexId === state.board.robberHexId) {
@@ -314,13 +362,11 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
         return { success: false, error: 'Invalid hex.' };
       }
 
-      // Move robber
       const oldHex = state.board.hexes[state.board.robberHexId];
       if (oldHex) oldHex.hasRobber = false;
       targetHex.hasRobber = true;
       state.board.robberHexId = action.hexId;
 
-      // Find adjacent players who have buildings on this hex (excluding active player)
       const stealTargets = new Set<string>();
       for (const vertex of Object.values(state.board.vertices)) {
         if (vertex.hexCoords.includes(action.hexId)) {
@@ -334,27 +380,33 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
         }
       }
 
+      const nextPhaseAfterRobber = !state.diceRolledThisTurn
+        ? 'TURN_START'
+        : action.playerId === state.pairedPlayerId && state.settings.pairedPlayersTurn
+          ? 'PAIRED_ACTION_PHASE'
+          : 'ACTION_PHASE';
+
       const targetsArray = Array.from(stealTargets);
       if (targetsArray.length === 0) {
-        state.phase = 'ACTION_PHASE';
+        state.phase = nextPhaseAfterRobber;
       } else if (targetsArray.length === 1) {
-        // Steal immediately from the only target
         const targetId = targetsArray[0];
         stealRandomCard(player, state.players[targetId], state);
-        state.phase = 'ACTION_PHASE';
+        state.phase = nextPhaseAfterRobber;
       } else {
         state.phase = 'ROBBER_STEAL';
         state.pendingStealTargets = targetsArray;
       }
 
       state.actionLog.push({
-        id: `log_${Date.now()}`,
+        id: `log_${Date.now()}_${Math.random()}`,
         timestamp: Date.now(),
         playerId: player.id,
         message: `${player.name} moved the robber.`,
         category: 'robber',
       });
 
+      refreshTurnTimer(state);
       syncPlayerVPs(state);
       return { success: true };
     }
@@ -363,9 +415,6 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
       if (state.phase !== 'ROBBER_STEAL') {
         return { success: false, error: 'Not in robber steal phase.' };
       }
-      if (action.playerId !== state.currentTurnPlayerId) {
-        return { success: false, error: 'Not your turn to steal.' };
-      }
       if (!state.pendingStealTargets.includes(action.targetPlayerId)) {
         return { success: false, error: 'Cannot steal from this player.' };
       }
@@ -373,8 +422,13 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
       const target = state.players[action.targetPlayerId];
       stealRandomCard(player, target, state);
       state.pendingStealTargets = [];
-      state.phase = 'ACTION_PHASE';
+      state.phase = !state.diceRolledThisTurn
+        ? 'TURN_START'
+        : action.playerId === state.pairedPlayerId && state.settings.pairedPlayersTurn
+          ? 'PAIRED_ACTION_PHASE'
+          : 'ACTION_PHASE';
 
+      refreshTurnTimer(state);
       syncPlayerVPs(state);
       return { success: true };
     }
@@ -389,7 +443,9 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
       if (player.roadsLeft <= 0) {
         return { success: false, error: 'No roads remaining in supply.' };
       }
-      if (!canAfford(player.resources, BUILDING_COSTS.road)) {
+
+      const isFreeRoad = state.freeRoadsRemaining > 0;
+      if (!isFreeRoad && !canAfford(player.resources, BUILDING_COSTS.road)) {
         return { success: false, error: 'Cannot afford road (1 Wood + 1 Brick required).' };
       }
       const edge = state.board.edges[action.edgeId];
@@ -398,37 +454,17 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
         return { success: false, error: 'Road already exists here.' };
       }
 
-      // Check connectivity: must touch friendly road or friendly settlement/city
-      const v1Building = state.board.buildings[edge.v1];
-      const v2Building = state.board.buildings[edge.v2];
-
-      const v1TouchesOwnBuilding = v1Building && v1Building.playerId === action.playerId;
-      const v2TouchesOwnBuilding = v2Building && v2Building.playerId === action.playerId;
-
-      // Check friendly roads touching v1 or v2 (provided the vertex is not blocked by an opponent building)
-      const v1FriendlyRoad =
-        (!v1Building || v1Building.playerId === action.playerId) &&
-        Object.values(state.board.roads).some(
-          (r) =>
-            r.playerId === action.playerId &&
-            (state.board.edges[r.edgeId].v1 === edge.v1 || state.board.edges[r.edgeId].v2 === edge.v1),
-        );
-
-      const v2FriendlyRoad =
-        (!v2Building || v2Building.playerId === action.playerId) &&
-        Object.values(state.board.roads).some(
-          (r) =>
-            r.playerId === action.playerId &&
-            (state.board.edges[r.edgeId].v1 === edge.v2 || state.board.edges[r.edgeId].v2 === edge.v2),
-        );
-
-      if (!v1TouchesOwnBuilding && !v2TouchesOwnBuilding && !v1FriendlyRoad && !v2FriendlyRoad) {
-        return { success: false, error: 'Road must connect to your existing network.' };
+      if (!isValidRoadEdge(state, action.playerId, action.edgeId)) {
+        return { success: false, error: 'Road must connect to your existing roads or buildings.' };
       }
 
-      // Deduct cost and place
-      player.resources = deductCost(player.resources, BUILDING_COSTS.road);
-      state.resourceBank = addResources(state.resourceBank, BUILDING_COSTS.road);
+      if (isFreeRoad) {
+        state.freeRoadsRemaining--;
+      } else {
+        player.resources = deductCost(player.resources, BUILDING_COSTS.road);
+        state.resourceBank = addResources(state.resourceBank, BUILDING_COSTS.road);
+      }
+
       state.board.roads[action.edgeId] = {
         id: `r_${action.edgeId}`,
         playerId: action.playerId,
@@ -436,7 +472,6 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
       };
       player.roadsLeft--;
 
-      // Recalculate Longest Route
       const { newOwnerId, playerLengths } = updateLongestRouteOwner(
         state.board,
         state.longestRouteOwnerId,
@@ -449,7 +484,7 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
       }
 
       state.actionLog.push({
-        id: `log_${Date.now()}`,
+        id: `log_${Date.now()}_${Math.random()}`,
         timestamp: Date.now(),
         playerId: player.id,
         message: `${player.name} built a road.`,
@@ -474,21 +509,12 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
         return { success: false, error: 'Cannot afford settlement (1 Wood, 1 Brick, 1 Wheat, 1 Sheep).' };
       }
       if (!satisfiesDistanceRule(action.vertexId, state.board)) {
-        return { success: false, error: 'Violates distance rule (too close to another building).' };
+        return { success: false, error: 'Violates Distance Rule: too close to another building.' };
       }
-
-      // Must connect to at least 1 friendly road
-      const hasConnectingRoad = Object.values(state.board.roads).some(
-        (r) =>
-          r.playerId === action.playerId &&
-          (state.board.edges[r.edgeId].v1 === action.vertexId || state.board.edges[r.edgeId].v2 === action.vertexId),
-      );
-
-      if (!hasConnectingRoad) {
+      if (!isValidSettlementVertex(state, action.playerId, action.vertexId)) {
         return { success: false, error: 'Settlement must connect to one of your roads.' };
       }
 
-      // Deduct cost and place
       player.resources = deductCost(player.resources, BUILDING_COSTS.settlement);
       state.resourceBank = addResources(state.resourceBank, BUILDING_COSTS.settlement);
       state.board.buildings[action.vertexId] = {
@@ -499,7 +525,6 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
       };
       player.settlementsLeft--;
 
-      // Recalculate Longest Route (in case this settlement interrupts an opponent)
       const { newOwnerId, playerLengths } = updateLongestRouteOwner(
         state.board,
         state.longestRouteOwnerId,
@@ -512,7 +537,7 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
       }
 
       state.actionLog.push({
-        id: `log_${Date.now()}`,
+        id: `log_${Date.now()}_${Math.random()}`,
         timestamp: Date.now(),
         playerId: player.id,
         message: `${player.name} built a settlement.`,
@@ -542,15 +567,14 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
         return { success: false, error: 'Must upgrade an existing settlement of your own.' };
       }
 
-      // Upgrade settlement to city
       player.resources = deductCost(player.resources, BUILDING_COSTS.city);
       state.resourceBank = addResources(state.resourceBank, BUILDING_COSTS.city);
       existingBuilding.type = 'city';
       player.citiesLeft--;
-      player.settlementsLeft++; // returns settlement back to supply
+      player.settlementsLeft++;
 
       state.actionLog.push({
-        id: `log_${Date.now()}`,
+        id: `log_${Date.now()}_${Math.random()}`,
         timestamp: Date.now(),
         playerId: player.id,
         message: `${player.name} upgraded a settlement to a City!`,
@@ -583,7 +607,7 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
       player.devCards.push(card);
 
       state.actionLog.push({
-        id: `log_${Date.now()}`,
+        id: `log_${Date.now()}_${Math.random()}`,
         timestamp: Date.now(),
         playerId: player.id,
         message: `${player.name} bought a Development Card.`,
@@ -608,7 +632,6 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
       }
       const card = player.devCards[cardIdx];
 
-      // Cannot play card on turn bought (unless VP card when winning)
       if (card.boughtTurn === state.turnNumber && card.type !== 'victory_point') {
         return { success: false, error: 'Cannot play a Development Card on the turn you bought it.' };
       }
@@ -617,14 +640,12 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
         return { success: false, error: 'Only one Development Card can be played per turn.' };
       }
 
-      // Handle card effects
       if (card.type === 'knight') {
         player.playedKnightsCount++;
         state.devCardPlayedThisTurn = true;
         player.devCards.splice(cardIdx, 1);
         player.playedDevCards.push(card);
 
-        // Check Largest Army (minimum 3 needed)
         if (player.playedKnightsCount >= 3) {
           const currentArmyOwner = state.largestArmyOwnerId ? state.players[state.largestArmyOwnerId] : null;
           const currentMax = currentArmyOwner ? currentArmyOwner.playedKnightsCount : 2;
@@ -636,20 +657,30 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
           }
         }
 
-        // Enter Robber movement
         state.phase = 'ROBBER_PLACEMENT';
+        refreshTurnTimer(state);
         state.actionLog.push({
-          id: `log_${Date.now()}`,
+          id: `log_${Date.now()}_${Math.random()}`,
           timestamp: Date.now(),
           playerId: player.id,
           message: `${player.name} played a Knight card!`,
           category: 'card',
         });
+      } else if (card.type === 'road_building') {
+        state.freeRoadsRemaining = Math.min(2, player.roadsLeft);
+        state.devCardPlayedThisTurn = true;
+        player.devCards.splice(cardIdx, 1);
+        player.playedDevCards.push(card);
+
+        state.actionLog.push({
+          id: `log_${Date.now()}_${Math.random()}`,
+          timestamp: Date.now(),
+          playerId: player.id,
+          message: `${player.name} played Road Building (2 free roads)!`,
+          category: 'card',
+        });
       } else if (card.type === 'year_of_plenty') {
-        if (!action.options?.yearOfPlentyResources || action.options.yearOfPlentyResources.length !== 2) {
-          return { success: false, error: 'Must select 2 resources for Year of Plenty.' };
-        }
-        const [r1, r2] = action.options.yearOfPlentyResources;
+        const [r1, r2] = action.options?.yearOfPlentyResources || ['wheat', 'ore'];
         player.resources[r1] = (player.resources[r1] || 0) + 1;
         player.resources[r2] = (player.resources[r2] || 0) + 1;
         state.resourceBank[r1] = Math.max(0, state.resourceBank[r1] - 1);
@@ -660,17 +691,14 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
         player.playedDevCards.push(card);
 
         state.actionLog.push({
-          id: `log_${Date.now()}`,
+          id: `log_${Date.now()}_${Math.random()}`,
           timestamp: Date.now(),
           playerId: player.id,
           message: `${player.name} played Year of Plenty (took ${r1} and ${r2}).`,
           category: 'card',
         });
       } else if (card.type === 'monopoly') {
-        if (!action.options?.monopolyResource) {
-          return { success: false, error: 'Must name a resource for Monopoly.' };
-        }
-        const targetRes = action.options.monopolyResource;
+        const targetRes = action.options?.monopolyResource || 'wheat';
         let totalStolen = 0;
         for (const otherPlayer of Object.values(state.players)) {
           if (otherPlayer.id !== player.id) {
@@ -688,7 +716,7 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
         player.playedDevCards.push(card);
 
         state.actionLog.push({
-          id: `log_${Date.now()}`,
+          id: `log_${Date.now()}_${Math.random()}`,
           timestamp: Date.now(),
           playerId: player.id,
           message: `${player.name} declared Monopoly on ${targetRes}! Stole ${totalStolen} cards.`,
@@ -714,7 +742,6 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
         return { success: false, error: `Bank has no ${action.asking} remaining.` };
       }
 
-      // Check player harbors
       const bestRatio = getPlayerMaritimeRatio(player.id, action.giving, state.board);
       if (action.ratio < bestRatio) {
         return { success: false, error: `Your best maritime trade ratio for ${action.giving} is ${bestRatio}:1.` };
@@ -727,7 +754,7 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
       state.resourceBank[action.asking] -= 1;
 
       state.actionLog.push({
-        id: `log_${Date.now()}`,
+        id: `log_${Date.now()}_${Math.random()}`,
         timestamp: Date.now(),
         playerId: player.id,
         message: `${player.name} traded ${action.ratio} ${action.giving} to the bank for 1 ${action.asking}.`,
@@ -765,7 +792,7 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
 
       state.activeTradeOffer = offer;
       state.actionLog.push({
-        id: `log_${Date.now()}`,
+        id: `log_${Date.now()}_${Math.random()}`,
         timestamp: Date.now(),
         playerId: player.id,
         message: `${player.name} proposed a trade offer.`,
@@ -786,7 +813,6 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
         }
         state.activeTradeOffer.status[action.playerId] = 'accepted';
 
-        // If active player wants instant execution, they can accept this acceptance
         const activeP = state.players[state.activeTradeOffer.fromPlayerId];
         executeTrade(activeP, player, state.activeTradeOffer.giving, state.activeTradeOffer.asking, state);
         state.activeTradeOffer = null;
@@ -820,7 +846,7 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
 
       state.activeTradeOffer.counterOffers.push(counter);
       state.actionLog.push({
-        id: `log_${Date.now()}`,
+        id: `log_${Date.now()}_${Math.random()}`,
         timestamp: Date.now(),
         playerId: player.id,
         message: `${player.name} submitted a counter-offer.`,
@@ -844,9 +870,6 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
       const counterPlayer = state.players[counter.fromPlayerId];
       if (!counterPlayer) return { success: false, error: 'Counter player not found.' };
 
-      // In a counter-offer:
-      // counter.giving is what counterPlayer gives to active player
-      // counter.asking is what counterPlayer receives from active player
       if (!canAfford(player.resources, counter.asking)) {
         return { success: false, error: 'You no longer have the cards required for this counter-offer.' };
       }
@@ -868,11 +891,11 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
     }
 
     case 'END_TURN': {
-      const is56 = state.settings.pairedPlayersTurn;
+      const is56 = state.settings.pairedPlayersTurn && Object.keys(state.players).length >= 5;
       state.activeTradeOffer = null;
+      state.freeRoadsRemaining = 0;
 
       if (!is56) {
-        // Standard 3-4 Player end turn: passes clockwise
         if (action.playerId !== state.currentTurnPlayerId) {
           return { success: false, error: 'Not your turn.' };
         }
@@ -885,19 +908,17 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
         state.diceRoll = null;
         state.turnNumber++;
       } else {
-        // 5-6 Player (Official 2025 6th Edition Paired Turn System)
         if (state.phase === 'ACTION_PHASE') {
           if (action.playerId !== state.currentTurnPlayerId) {
             return { success: false, error: 'Not your turn.' };
           }
-          // Player 1 finishes their action phase.
-          // Player 2 takes their Paired Action Phase!
           const playerIds = Object.keys(state.players);
           state.pairedPlayerId = getPairedPlayerId(state.currentTurnPlayerId, playerIds);
           state.phase = 'PAIRED_ACTION_PHASE';
+          state.devCardPlayedThisTurn = false;
 
           state.actionLog.push({
-            id: `log_${Date.now()}`,
+            id: `log_${Date.now()}_${Math.random()}`,
             timestamp: Date.now(),
             playerId: state.pairedPlayerId,
             message: `Paired Players Turn: ${state.players[state.pairedPlayerId].name} begins their Action Phase.`,
@@ -907,8 +928,6 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
           if (action.playerId !== state.pairedPlayerId) {
             return { success: false, error: 'Not your paired action phase.' };
           }
-          // Player 2 finishes their action phase.
-          // Pass the dice and player markers clockwise!
           const playerIds = Object.keys(state.players);
           const nextP1Index = (playerIds.indexOf(state.currentTurnPlayerId) + 1) % playerIds.length;
           state.currentTurnPlayerId = playerIds[nextP1Index];
@@ -923,12 +942,113 @@ export function applyAction(state: GameState, action: GameAction): { success: bo
         }
       }
 
+      refreshTurnTimer(state);
       syncPlayerVPs(state);
       return { success: true };
     }
 
     default:
       return { success: false, error: 'Unknown action type.' };
+  }
+}
+
+// Auto-roller / Auto-pass handler when turn timer expires
+export function handleTurnTimeout(state: GameState): boolean {
+  if (state.phase === 'GAME_OVER' || state.phase === 'LOBBY') return false;
+  if (!state.turnDeadlineMs || Date.now() < state.turnDeadlineMs) return false;
+
+  switch (state.phase) {
+    case 'SETUP_ROUND_1':
+    case 'SETUP_ROUND_2': {
+      const setupPlayerId = state.setupTurnOrder[state.setupTurnIndex];
+      if (!state.lastSetupVertexId) {
+        const validVertices = Object.keys(state.board.vertices).filter((vid) =>
+          satisfiesDistanceRule(vid, state.board),
+        );
+        if (validVertices.length > 0) {
+          const randomV = validVertices[Math.floor(Math.random() * validVertices.length)];
+          applyAction(state, { type: 'BUILD_SETUP_SETTLEMENT', playerId: setupPlayerId, vertexId: randomV });
+        }
+      }
+      if (state.lastSetupVertexId) {
+        const validEdges = Object.values(state.board.edges).filter(
+          (e) =>
+            !state.board.roads[e.id] &&
+            (e.v1 === state.lastSetupVertexId || e.v2 === state.lastSetupVertexId),
+        );
+        if (validEdges.length > 0) {
+          const randomE = validEdges[Math.floor(Math.random() * validEdges.length)];
+          applyAction(state, { type: 'BUILD_SETUP_ROAD', playerId: setupPlayerId, edgeId: randomE.id });
+        }
+      }
+      return true;
+    }
+
+    case 'TURN_START': {
+      applyAction(state, { type: 'ROLL_DICE', playerId: state.currentTurnPlayerId });
+      return true;
+    }
+
+    case 'DISCARD_PHASE': {
+      for (const [pid, needed] of Object.entries(state.pendingDiscards)) {
+        const p = state.players[pid];
+        if (!p || needed <= 0) continue;
+        const pool: ResourceType[] = [];
+        for (const [res, count] of Object.entries(p.resources) as Array<[ResourceType, number]>) {
+          for (let i = 0; i < count; i++) pool.push(res);
+        }
+        const toDiscard: Partial<ResourceCount> = {};
+        for (let i = 0; i < needed && pool.length > 0; i++) {
+          const idx = Math.floor(Math.random() * pool.length);
+          const chosen = pool.splice(idx, 1)[0];
+          toDiscard[chosen] = (toDiscard[chosen] || 0) + 1;
+        }
+        applyAction(state, { type: 'DISCARD_CARDS', playerId: pid, resources: toDiscard });
+      }
+      return true;
+    }
+
+    case 'ROBBER_PLACEMENT': {
+      const candidateHexes = Object.keys(state.board.hexes).filter(
+        (hid) => hid !== state.board.robberHexId && state.board.hexes[hid].terrain !== 'desert',
+      );
+      const chosenHex =
+        candidateHexes[Math.floor(Math.random() * candidateHexes.length)] ||
+        Object.keys(state.board.hexes).find((hid) => hid !== state.board.robberHexId)!;
+      applyAction(state, {
+        type: 'MOVE_ROBBER',
+        playerId: state.currentTurnPlayerId,
+        hexId: chosenHex,
+      });
+      return true;
+    }
+
+    case 'ROBBER_STEAL': {
+      const targetId = state.pendingStealTargets[0];
+      if (targetId) {
+        applyAction(state, {
+          type: 'STEAL_FROM_PLAYER',
+          playerId: state.currentTurnPlayerId,
+          targetPlayerId: targetId,
+        });
+      }
+      return true;
+    }
+
+    case 'ACTION_PHASE': {
+      applyAction(state, { type: 'END_TURN', playerId: state.currentTurnPlayerId });
+      return true;
+    }
+
+    case 'PAIRED_ACTION_PHASE': {
+      if (state.pairedPlayerId) {
+        applyAction(state, { type: 'END_TURN', playerId: state.pairedPlayerId });
+      }
+      return true;
+    }
+
+    default:
+      return false;
   }
 }
 
@@ -944,7 +1064,7 @@ function stealRandomCard(stealer: any, victim: any, state: GameState) {
   stealer.resources[chosen] = (stealer.resources[chosen] || 0) + 1;
 
   state.actionLog.push({
-    id: `log_${Date.now()}`,
+    id: `log_${Date.now()}_${Math.random()}`,
     timestamp: Date.now(),
     playerId: stealer.id,
     message: `${stealer.name} stole a card from ${victim.name}.`,
@@ -966,7 +1086,7 @@ function executeTrade(
   p2.resources = addResources(p2.resources, p1Gives);
 
   state.actionLog.push({
-    id: `log_${Date.now()}`,
+    id: `log_${Date.now()}_${Math.random()}`,
     timestamp: Date.now(),
     message: `Trade completed between ${p1.name} and ${p2.name}!`,
     category: 'trade',
@@ -976,7 +1096,7 @@ function executeTrade(
 }
 
 export function getPlayerMaritimeRatio(playerId: string, resource: ResourceType, board: BoardState): number {
-  let best = 4; // default bank trade
+  let best = 4;
 
   for (const harbor of Object.values(board.harbors)) {
     const touchesPlayer =

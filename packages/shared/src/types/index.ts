@@ -45,11 +45,11 @@ export type ExpansionType = 'base' | 'cities_and_knights' | 'seafarers';
 
 export interface GameSettings {
   expansion: ExpansionType;
-  maxPlayers: number; // 3, 4, 5, or 6
-  pairedPlayersTurn: boolean; // default true for 5-6 player
+  maxPlayers: number; // 2, 3, 4, 5, or 6
+  pairedPlayersTurn: boolean; // true for 5-6 player
   victoryPointsToWin: number; // 10 for Base, 13 for C&K
   cardDiscardLimit: number; // default 7
-  turnTimeoutSeconds: number; // 0 for infinite, or 60/90/120
+  turnTimeoutSeconds: number; // default 60
 }
 
 export interface ResourceCount {
@@ -73,7 +73,7 @@ export type GamePhase =
   | 'GAME_OVER';
 
 export interface VertexCoordinate {
-  id: string; // sorted canonical hex IDs e.g. "0,0,0|0,1,-1|1,0,-1"
+  id: string; // canonical vertex ID e.g. "v_60_0"
   hexCoords: string[];
   x: number;
   y: number;
@@ -105,6 +105,7 @@ export interface Harbor {
   type: HarborType;
   vertexIds: [string, string]; // 2 vertices on the coast
   edgeId: string;
+  coastalHexId: string; // The land hex bordering this harbor
   ratio: number; // 2 or 3
   resource?: ResourceType;
 }
@@ -186,9 +187,14 @@ export interface GameState {
   pairedPlayerId?: string; // Player 2 during paired turn
   setupTurnOrder: string[]; // player IDs in snake draft order
   setupTurnIndex: number;
+  lastSetupVertexId: string | null; // Tracks the settlement just placed in setup so road attaches to it
   diceRoll: [number, number] | null;
+  lastDiceRollAt: number | null; // Timestamp of last roll to trigger client dice animation
   diceRolledThisTurn: boolean;
   devCardPlayedThisTurn: boolean;
+  freeRoadsRemaining: number; // From Road Building dev card
+  turnDeadlineMs: number | null; // Unix timestamp (ms) when current sub-turn expires
+  phaseDurationMs: number; // Total duration (ms) of current sub-turn for progress bar
   board: BoardState;
   players: Record<string, PlayerPrivateState>;
   devCardDeck: DevCard[];

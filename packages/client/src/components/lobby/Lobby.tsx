@@ -45,7 +45,7 @@ export const Lobby: React.FC = () => {
     const isHost = room.hostPlayerId === myPlayerId;
     const playerCount = Object.keys(room.players).length;
     const maxPlayers = room.is5to6Player ? 6 : 4;
-    const canStart = isHost && playerCount >= 3;
+    const canStart = isHost && playerCount >= 2;
 
     return (
       <div className="min-h-screen flex items-center justify-center p-4 bg-radial from-slate-900 to-slate-950">
@@ -77,7 +77,7 @@ export const Lobby: React.FC = () => {
           <div className="flex flex-col gap-2">
             <div className="flex items-center justify-between text-xs text-slate-400 font-semibold px-1">
               <span>Joined Settlers ({playerCount}/{maxPlayers})</span>
-              <span>Need $\ge 3$ to start</span>
+              <span>Need ≥ 2 to start</span>
             </div>
             <div className="grid grid-cols-1 gap-2">
               {Object.values(room.players).map((p) => {

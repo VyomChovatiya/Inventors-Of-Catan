@@ -1,22 +1,15 @@
 import {
   BoardState,
   DevCard,
-  DevCardType,
-  GameLogEntry,
   GamePhase,
   GameState,
-  HarborType,
   PlayerColor,
   PlayerPrivateState,
   RedactedGameState,
   ResourceCount,
-  ResourceType,
-  TradeOffer,
-  CounterOffer,
 } from '../types/index.js';
 import { generateBoard } from '../board/generator.js';
-import { BUILDING_COSTS, canAfford, deductCost, addResources, MAX_PIECES } from './costs.js';
-import { updateLongestRouteOwner } from './longestRoute.js';
+import { MAX_PIECES } from './costs.js';
 
 export const INITIAL_BANK: ResourceCount = {
   wood: 19,
@@ -34,13 +27,31 @@ export const INITIAL_BANK_5_6: ResourceCount = {
   ore: 24,
 };
 
+// PlaySettlr-inspired phase durations (in milliseconds)
+export const PHASE_DURATIONS_MS: Record<GamePhase, number> = {
+  LOBBY: 0,
+  SETUP_ROUND_1: 45_000, // 45s to place settlement + road
+  SETUP_ROUND_2: 45_000, // 45s to place 2nd settlement + road
+  TURN_START: 15_000, // 15s to roll dice (auto-rolls on timeout)
+  DISCARD_PHASE: 30_000, // 30s to discard on 7 (auto-discards on timeout)
+  ROBBER_PLACEMENT: 25_000, // 25s to move robber (auto-moves on timeout)
+  ROBBER_STEAL: 20_000, // 20s to choose steal victim
+  ACTION_PHASE: 60_000, // 60s main turn (auto-passes on timeout)
+  PAIRED_ACTION_PHASE: 30_000, // 30s paired player turn (auto-passes on timeout)
+  GAME_OVER: 0,
+};
+
+export function refreshTurnTimer(state: GameState) {
+  const duration = PHASE_DURATIONS_MS[state.phase] || 0;
+  state.phaseDurationMs = duration;
+  state.turnDeadlineMs = duration > 0 ? Date.now() + duration : null;
+}
+
 export function createDevCardDeck(is5to6: boolean): DevCard[] {
   const cards: DevCard[] = [];
   let id = 1;
 
-  // Base dev cards
   const knightsCount = is5to6 ? 20 : 14;
-  const vpCount = 5;
   const roadBuildingCount = is5to6 ? 3 : 2;
   const yearOfPlentyCount = is5to6 ? 3 : 2;
   const monopolyCount = is5to6 ? 3 : 2;
@@ -61,7 +72,6 @@ export function createDevCardDeck(is5to6: boolean): DevCard[] {
     cards.push({ id: `dc_${id++}`, type: 'victory_point', vpName: name });
   }
 
-  // Shuffle
   for (let i = cards.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [cards[i], cards[j]] = [cards[j], cards[i]];
@@ -104,6 +114,7 @@ export function initializeGame(
   is5to6 = false,
 ): GameState {
   const isExpanded = is5to6 || playersList.length > 4;
+  const usePairedTurn = isExpanded && playersList.length >= 5;
   const board = generateBoard(isExpanded);
   const devCardDeck = createDevCardDeck(isExpanded);
   const resourceBank = isExpanded ? { ...INITIAL_BANK_5_6 } : { ...INITIAL_BANK };
@@ -121,17 +132,17 @@ export function initializeGame(
   for (let i = playerIds.length - 1; i >= 0; i--) setupTurnOrder.push(playerIds[i]);
 
   const firstPlayerId = setupTurnOrder[0];
-  const pairedPlayerId = isExpanded ? getPairedPlayerId(firstPlayerId, playerIds) : undefined;
+  const pairedPlayerId = usePairedTurn ? getPairedPlayerId(firstPlayerId, playerIds) : undefined;
 
-  return {
+  const state: GameState = {
     id: gameId,
     settings: {
       expansion: 'base',
       maxPlayers: isExpanded ? 6 : 4,
-      pairedPlayersTurn: isExpanded,
+      pairedPlayersTurn: usePairedTurn,
       victoryPointsToWin: 10,
       cardDiscardLimit: 7,
-      turnTimeoutSeconds: 0,
+      turnTimeoutSeconds: 60,
     },
     phase: 'SETUP_ROUND_1',
     turnNumber: 1,
@@ -139,9 +150,14 @@ export function initializeGame(
     pairedPlayerId,
     setupTurnOrder,
     setupTurnIndex: 0,
+    lastSetupVertexId: null,
     diceRoll: null,
+    lastDiceRollAt: null,
     diceRolledThisTurn: false,
     devCardPlayedThisTurn: false,
+    freeRoadsRemaining: 0,
+    turnDeadlineMs: null,
+    phaseDurationMs: PHASE_DURATIONS_MS.SETUP_ROUND_1,
     board,
     players,
     devCardDeck,
@@ -161,16 +177,17 @@ export function initializeGame(
       },
     ],
   };
+
+  refreshTurnTimer(state);
+  return state;
 }
 
-// Player 2 is 3 seats clockwise from Player 1 (seatIndex + 3 % totalPlayers)
 export function getPairedPlayerId(player1Id: string, playerIds: string[]): string {
   const p1Index = playerIds.indexOf(player1Id);
   const p2Index = (p1Index + 3) % playerIds.length;
   return playerIds[p2Index];
 }
 
-// Find adjacent vertices to a given vertex
 export function getAdjacentVertices(vertexId: string, board: BoardState): string[] {
   const adjacent = new Set<string>();
   for (const edge of Object.values(board.edges)) {
@@ -180,7 +197,6 @@ export function getAdjacentVertices(vertexId: string, board: BoardState): string
   return Array.from(adjacent);
 }
 
-// Check distance rule: no building on vertexId or any adjacent vertex
 export function satisfiesDistanceRule(vertexId: string, board: BoardState): boolean {
   if (board.buildings[vertexId]) return false;
   const adj = getAdjacentVertices(vertexId, board);
@@ -190,24 +206,75 @@ export function satisfiesDistanceRule(vertexId: string, board: BoardState): bool
   return true;
 }
 
-// Calculate victory points for a player
+export function isValidSetupSettlementVertex(state: GameState, playerId: string, vertexId: string): boolean {
+  if (state.phase !== 'SETUP_ROUND_1' && state.phase !== 'SETUP_ROUND_2') return false;
+  if (state.setupTurnOrder[state.setupTurnIndex] !== playerId) return false;
+  if (state.lastSetupVertexId !== null) return false;
+  if (!state.board.vertices[vertexId]) return false;
+  return satisfiesDistanceRule(vertexId, state.board);
+}
+
+export function isValidSetupRoadEdge(state: GameState, playerId: string, edgeId: string): boolean {
+  if (state.phase !== 'SETUP_ROUND_1' && state.phase !== 'SETUP_ROUND_2') return false;
+  if (state.setupTurnOrder[state.setupTurnIndex] !== playerId) return false;
+  if (!state.lastSetupVertexId) return false;
+  const edge = state.board.edges[edgeId];
+  if (!edge || state.board.roads[edgeId]) return false;
+  return edge.v1 === state.lastSetupVertexId || edge.v2 === state.lastSetupVertexId;
+}
+
+export function isValidRoadEdge(state: GameState, playerId: string, edgeId: string): boolean {
+  const edge = state.board.edges[edgeId];
+  if (!edge || state.board.roads[edgeId]) return false;
+
+  const v1Building = state.board.buildings[edge.v1];
+  const v2Building = state.board.buildings[edge.v2];
+
+  const v1TouchesOwnBuilding = v1Building && v1Building.playerId === playerId;
+  const v2TouchesOwnBuilding = v2Building && v2Building.playerId === playerId;
+
+  const v1FriendlyRoad =
+    (!v1Building || v1Building.playerId === playerId) &&
+    Object.values(state.board.roads).some(
+      (r) =>
+        r.playerId === playerId &&
+        (state.board.edges[r.edgeId].v1 === edge.v1 || state.board.edges[r.edgeId].v2 === edge.v1),
+    );
+
+  const v2FriendlyRoad =
+    (!v2Building || v2Building.playerId === playerId) &&
+    Object.values(state.board.roads).some(
+      (r) =>
+        r.playerId === playerId &&
+        (state.board.edges[r.edgeId].v1 === edge.v2 || state.board.edges[r.edgeId].v2 === edge.v2),
+    );
+
+  return Boolean(v1TouchesOwnBuilding || v2TouchesOwnBuilding || v1FriendlyRoad || v2FriendlyRoad);
+}
+
+export function isValidSettlementVertex(state: GameState, playerId: string, vertexId: string): boolean {
+  if (!state.board.vertices[vertexId]) return false;
+  if (!satisfiesDistanceRule(vertexId, state.board)) return false;
+
+  const hasConnectingRoad = Object.values(state.board.roads).some(
+    (r) =>
+      r.playerId === playerId &&
+      (state.board.edges[r.edgeId].v1 === vertexId || state.board.edges[r.edgeId].v2 === vertexId),
+  );
+  return hasConnectingRoad;
+}
+
 export function computeVictoryPoints(player: PlayerPrivateState): number {
   let vps = 0;
-  // Settlements: 1 VP each (calculated from remaining)
   const settlementsBuilt = MAX_PIECES.settlements - player.settlementsLeft;
   vps += settlementsBuilt;
 
-  // Cities: 2 VPs each
   const citiesBuilt = MAX_PIECES.cities - player.citiesLeft;
   vps += citiesBuilt * 2;
 
-  // Longest Route: 2 VPs
   if (player.hasLongestRoute) vps += 2;
-
-  // Largest Army: 2 VPs
   if (player.hasLargestArmy) vps += 2;
 
-  // Victory point development cards
   for (const card of player.devCards) {
     if (card.type === 'victory_point') {
       vps += 1;
@@ -226,8 +293,9 @@ export function syncPlayerVPs(state: GameState) {
     if (player.victoryPoints >= state.settings.victoryPointsToWin && !state.winnerId) {
       state.winnerId = player.id;
       state.phase = 'GAME_OVER';
+      state.turnDeadlineMs = null;
       state.actionLog.push({
-        id: `log_${Date.now()}`,
+        id: `log_${Date.now()}_${Math.random()}`,
         timestamp: Date.now(),
         playerId: player.id,
         message: `🏆 ${player.name} has reached ${player.victoryPoints} Victory Points and won the game!`,
@@ -237,7 +305,6 @@ export function syncPlayerVPs(state: GameState) {
   }
 }
 
-// Redact state for a specific client (Anti-cheat)
 export function redactStateForPlayer(state: GameState, requestingPlayerId: string): RedactedGameState {
   const publicPlayers: Record<string, any> = {};
 

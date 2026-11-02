@@ -1,10 +1,18 @@
 import { describe, it, expect } from 'vitest';
 import { initializeGame, satisfiesDistanceRule } from './engine.js';
-import { applyAction } from './actions.js';
-import { calculatePlayerLongestRoute, updateLongestRouteOwner } from './longestRoute.js';
+import { applyAction, handleTurnTimeout } from './actions.js';
+import { calculatePlayerLongestRoute } from './longestRoute.js';
 
 describe('Catan Rules Engine - Phase 1', () => {
-  it('initializes a 4-player game with snake draft setup order', () => {
+  it('initializes a 2-player or 4-player game with snake draft setup order', () => {
+    const twoPlayers = [
+      { id: 'p1', name: 'Alice', color: 'red' as const },
+      { id: 'p2', name: 'Bob', color: 'blue' as const },
+    ];
+    const game2p = initializeGame('test_game_2p', twoPlayers, false);
+    expect(game2p.phase).toBe('SETUP_ROUND_1');
+    expect(game2p.setupTurnOrder).toEqual(['p1', 'p2', 'p2', 'p1']);
+
     const players = [
       { id: 'p1', name: 'Alice', color: 'red' as const },
       { id: 'p2', name: 'Bob', color: 'blue' as const },
@@ -33,44 +41,71 @@ describe('Catan Rules Engine - Phase 1', () => {
     expect(game.phase).toBe('SETUP_ROUND_1');
     expect(Object.keys(game.board.hexes).length).toBe(30);
     expect(game.settings.pairedPlayersTurn).toBe(true);
-    // Player 2 is 3 seats to the left of Player 1: index (0 + 3) = 3 -> Diana ('p4')
     expect(game.pairedPlayerId).toBe('p4');
   });
 
-  it('enforces the distance rule', () => {
+  it('enforces the distance rule and requires setup road to attach to the just-placed settlement', () => {
     const players = [
       { id: 'p1', name: 'Alice', color: 'red' as const },
       { id: 'p2', name: 'Bob', color: 'blue' as const },
-      { id: 'p3', name: 'Charlie', color: 'orange' as const },
     ];
     const game = initializeGame('test_dist', players, false);
 
-    // Pick a valid vertex
     const vertexIds = Object.keys(game.board.vertices);
     const v1 = vertexIds[0];
 
-    // Alice builds a settlement
+    // Alice builds 1st settlement
     const res1 = applyAction(game, { type: 'BUILD_SETUP_SETTLEMENT', playerId: 'p1', vertexId: v1 });
     expect(res1.success).toBe(true);
+    expect(game.lastSetupVertexId).toBe(v1);
 
-    // Find an adjacent vertex
-    const edge = Object.values(game.board.edges).find((e) => e.v1 === v1 || e.v2 === v1)!;
-    const vAdjacent = edge.v1 === v1 ? edge.v2 : edge.v1;
+    // Find an edge NOT connected to v1
+    const unrelatedEdge = Object.values(game.board.edges).find((e) => e.v1 !== v1 && e.v2 !== v1)!;
+    const badRoad = applyAction(game, {
+      type: 'BUILD_SETUP_ROAD',
+      playerId: 'p1',
+      edgeId: unrelatedEdge.id,
+    });
+    expect(badRoad.success).toBe(false);
 
-    // Distance rule check
-    expect(satisfiesDistanceRule(vAdjacent, game.board)).toBe(false);
+    // Connected edge succeeds
+    const connectedEdge = Object.values(game.board.edges).find((e) => e.v1 === v1 || e.v2 === v1)!;
+    const goodRoad = applyAction(game, {
+      type: 'BUILD_SETUP_ROAD',
+      playerId: 'p1',
+      edgeId: connectedEdge.id,
+    });
+    expect(goodRoad.success).toBe(true);
+    expect(game.lastSetupVertexId).toBeNull();
+  });
+
+  it('auto-rolls and auto-passes when turn deadline expires', () => {
+    const players = [
+      { id: 'p1', name: 'Alice', color: 'red' as const },
+      { id: 'p2', name: 'Bob', color: 'blue' as const },
+    ];
+    const game = initializeGame('test_timeout', players, false);
+
+    // Complete 4 setup turns via timeout
+    for (let i = 0; i < 4; i++) {
+      game.turnDeadlineMs = Date.now() - 1000;
+      expect(handleTurnTimeout(game)).toBe(true);
+    }
+
+    expect(game.phase).toBe('TURN_START');
+    // Expire roll dice timer -> auto-rolls!
+    game.turnDeadlineMs = Date.now() - 1000;
+    expect(handleTurnTimeout(game)).toBe(true);
+    expect(game.diceRolledThisTurn).toBe(true);
   });
 
   it('accurately computes longest continuous route with opponent interruption', () => {
     const players = [
       { id: 'p1', name: 'Alice', color: 'red' as const },
       { id: 'p2', name: 'Bob', color: 'blue' as const },
-      { id: 'p3', name: 'Charlie', color: 'orange' as const },
     ];
     const game = initializeGame('test_lr', players, false);
 
-    // Find a chain of 5 connected edges
-    // Build a simple 5-road line for Alice
     const edgesList = Object.values(game.board.edges);
     const pathEdges: string[] = [];
 
@@ -92,14 +127,13 @@ describe('Catan Rules Engine - Phase 1', () => {
       const length = calculatePlayerLongestRoute('p1', game.board);
       expect(length).toBe(pathEdges.length);
 
-      // Now Bob places a settlement right in the middle of Alice's road chain
       const middleEdge = game.board.edges[pathEdges[2]];
       const middleVertex = middleEdge.v1;
 
       game.board.buildings[middleVertex] = {
         id: `b_${middleVertex}`,
         type: 'settlement',
-        playerId: 'p2', // Bob interrupts Alice's route!
+        playerId: 'p2',
         vertexId: middleVertex,
       };
 

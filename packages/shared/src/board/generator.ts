@@ -11,7 +11,6 @@ import {
 import {
   CubeCoord,
   HEX_RADIUS,
-  cubeDistance,
   hexNeighbors,
   hexCoordToString,
 } from '../coordinates/hex.js';
@@ -96,14 +95,6 @@ export function getBaseHexCoords(): CubeCoord[] {
 
 export function get56HexCoords(): CubeCoord[] {
   const coords: CubeCoord[] = [];
-  // 7 columns: -3 to +3
-  // q = -3: 3 hexes (r from 0 to 2)
-  // q = -2: 4 hexes (r from -1 to 2)
-  // q = -1: 5 hexes (r from -2 to 2)
-  // q =  0: 6 hexes (r from -3 to 2)
-  // q =  1: 5 hexes (r from -3 to 1)
-  // q =  2: 4 hexes (r from -3 to 0)
-  // q =  3: 3 hexes (r from -3 to -1)
   const colRanges: Record<number, [number, number]> = {
     [-3]: [0, 2],
     [-2]: [-1, 2],
@@ -135,10 +126,8 @@ export function generateBoard(is5to6Player = false): BoardState {
     }
   }
   const shuffledTerrains = shuffle(terrains);
-
-  // Separate non-desert coords and place desert
   const numbersPool = shuffle(is5to6Player ? EXPANDED_NUMBER_TOKENS : BASE_NUMBER_TOKENS);
-  
+
   // Arrange so that red numbers (6 and 8) never touch
   let validAssignment = false;
   let finalTiles: HexTile[] = [];
@@ -170,7 +159,6 @@ export function generateBoard(is5to6Player = false): BoardState {
       });
     }
 
-    // Check red numbers adjacency (6 and 8)
     let redClash = false;
     for (const tile of tileMap.values()) {
       if (tile.number === 6 || tile.number === 8) {
@@ -192,7 +180,6 @@ export function generateBoard(is5to6Player = false): BoardState {
     }
   }
 
-  // Fallback if max attempts exceeded
   if (!validAssignment) {
     let numIdx = 0;
     finalTiles = hexCoords.map((coord, idx) => {
@@ -225,7 +212,6 @@ export function generateBoard(is5to6Player = false): BoardState {
       robberHexId = tile.id;
     }
 
-    // Accumulate vertices
     const tileVerts = generateVerticesForHex(tile, HEX_RADIUS);
     for (const v of tileVerts) {
       if (!vertices[v.id]) {
@@ -237,7 +223,6 @@ export function generateBoard(is5to6Player = false): BoardState {
       }
     }
 
-    // Accumulate edges
     const tileEdges = generateEdgesForHex(tile, HEX_RADIUS);
     for (const e of tileEdges) {
       if (!edges[e.id]) {
@@ -246,33 +231,38 @@ export function generateBoard(is5to6Player = false): BoardState {
     }
   }
 
-  // Detect coastal edges (edges belonging to only 1 hex) and place harbors
-  const coastalEdges: EdgeCoordinate[] = [];
-  const edgeHexCount = new Map<string, number>();
+  // Detect coastal edges (edges belonging to only 1 hex) and track which hex owns them
+  const edgeHexOwners = new Map<string, string[]>();
 
   for (const tile of finalTiles) {
     const tileEdges = generateEdgesForHex(tile, HEX_RADIUS);
     for (const e of tileEdges) {
-      edgeHexCount.set(e.id, (edgeHexCount.get(e.id) || 0) + 1);
+      const list = edgeHexOwners.get(e.id) || [];
+      list.push(tile.id);
+      edgeHexOwners.set(e.id, list);
     }
   }
 
-  for (const [edgeId, count] of edgeHexCount.entries()) {
-    if (count === 1) {
-      coastalEdges.push(edges[edgeId]);
+  const coastalEdges: Array<{ edge: EdgeCoordinate; coastalHexId: string; angle: number }> = [];
+  for (const [edgeId, owners] of edgeHexOwners.entries()) {
+    if (owners.length === 1) {
+      const edge = edges[edgeId];
+      const angle = Math.atan2(edge.midY, edge.midX);
+      coastalEdges.push({ edge, coastalHexId: owners[0], angle });
     }
   }
 
-  // Distribute harbors along coastal edges spaced out
+  // Sort coastal edges clockwise around the island perimeter
+  coastalEdges.sort((a, b) => a.angle - b.angle);
+
+  // Distribute harbors evenly around the perimeter so they never clump
   const harbors: Record<string, Harbor> = {};
   const harborTypes = is5to6Player ? [...BASE_HARBORS, 'generic_3_1', 'sheep_2_1'] : BASE_HARBORS;
-  
-  // Pick evenly spaced coastal edges
-  const step = Math.max(1, Math.floor(coastalEdges.length / harborTypes.length));
+
   for (let i = 0; i < harborTypes.length; i++) {
-    const edgeIndex = (i * step) % coastalEdges.length;
-    const edge = coastalEdges[edgeIndex];
-    if (edge) {
+    const edgeIndex = Math.floor((i * coastalEdges.length) / harborTypes.length);
+    const item = coastalEdges[edgeIndex];
+    if (item) {
       const type = harborTypes[i] as HarborType;
       const is21 = type.endsWith('_2_1');
       const resourceStr = is21 ? type.split('_')[0] : undefined;
@@ -280,8 +270,9 @@ export function generateBoard(is5to6Player = false): BoardState {
       harbors[id] = {
         id,
         type,
-        edgeId: edge.id,
-        vertexIds: [edge.v1, edge.v2],
+        edgeId: item.edge.id,
+        coastalHexId: item.coastalHexId,
+        vertexIds: [item.edge.v1, item.edge.v2],
         ratio: is21 ? 2 : 3,
         resource: resourceStr as ResourceType | undefined,
       };

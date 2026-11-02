@@ -7,6 +7,7 @@ import {
   initializeGame,
   applyAction,
   redactStateForPlayer,
+  handleTurnTimeout,
   GameAction,
 } from '@catan/shared';
 
@@ -48,7 +49,6 @@ export class RoomManager {
         if (file.endsWith('.json')) {
           const content = fs.readFileSync(path.join(DATA_DIR, file), 'utf-8');
           const room: Room = JSON.parse(content);
-          // Mark all players as disconnected on server restart
           for (const p of Object.values(room.players)) {
             p.connected = false;
             p.socketId = null;
@@ -71,7 +71,12 @@ export class RoomManager {
     }
   }
 
-  createRoom(hostName: string, hostColor: PlayerColor, sessionToken: string, is5to6Player = false): { room: Room; player: RoomPlayer } {
+  createRoom(
+    hostName: string,
+    hostColor: PlayerColor,
+    sessionToken: string,
+    is5to6Player = false,
+  ): { room: Room; player: RoomPlayer } {
     const code = Math.random().toString(36).substring(2, 8).toUpperCase();
     const playerId = `usr_${Math.random().toString(36).substring(2, 9)}`;
 
@@ -103,7 +108,12 @@ export class RoomManager {
     return this.rooms.get(code.toUpperCase());
   }
 
-  joinRoom(code: string, name: string, color: PlayerColor, sessionToken: string): { room: Room; player: RoomPlayer } | { error: string } {
+  joinRoom(
+    code: string,
+    name: string,
+    color: PlayerColor,
+    sessionToken: string,
+  ): { room: Room; player: RoomPlayer } | { error: string } {
     const room = this.getRoom(code);
     if (!room) return { error: 'Room not found.' };
 
@@ -128,7 +138,6 @@ export class RoomManager {
       return { error: `Room is full (max ${maxPlayers} players).` };
     }
 
-    // Ensure color is unique
     const takenColors = Object.values(room.players).map((p) => p.color);
     const availableColors: PlayerColor[] = ['red', 'blue', 'orange', 'white', 'green', 'purple'].filter(
       (c) => !takenColors.includes(c as PlayerColor),
@@ -199,8 +208,8 @@ export class RoomManager {
       color: p.color,
     }));
 
-    if (playersList.length < 3) {
-      return { success: false, error: 'Need at least 3 players to start CATAN.' };
+    if (playersList.length < 2) {
+      return { success: false, error: 'Need at least 2 players to start CATAN.' };
     }
 
     room.gameState = initializeGame(`gm_${room.code}`, playersList, room.is5to6Player);
@@ -219,6 +228,22 @@ export class RoomManager {
       this.persistRoom(room);
     }
     return result;
+  }
+
+  checkTurnTimeouts(): string[] {
+    const updatedRoomCodes: string[] = [];
+    for (const room of this.rooms.values()) {
+      if (!room.gameState) continue;
+      // Only run auto-timers if at least 1 player is connected to the room
+      const anyConnected = Object.values(room.players).some((p) => p.connected);
+      if (!anyConnected) continue;
+
+      if (handleTurnTimeout(room.gameState)) {
+        this.persistRoom(room);
+        updatedRoomCodes.push(room.code);
+      }
+    }
+    return updatedRoomCodes;
   }
 
   getRedactedState(code: string, playerId: string): RedactedGameState | null {
