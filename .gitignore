@@ -1,6 +1,40 @@
+# Dependencies
 node_modules/
-dist/
-data/
 .pnpm-store/
-.DS_Store
+
+# Build outputs & TypeScript caches
+dist/
+build/
+*.tsbuildinfo
+.vite/
+
+# Runtime persisted room & session data
+data/
+packages/server/data/
+*.tmp
+
+# Environment variables & secrets (keep .env.example tracked)
+.env
+.env.*
+!.env.example
+
+# Test & coverage artifacts
+coverage/
+.vitest/
+
+# Logs
+logs/
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*.swo

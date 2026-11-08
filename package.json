@@ -7,6 +7,8 @@
     "dev": "pnpm --parallel --filter \"./packages/*\" dev",
     "dev:server": "pnpm --filter @catan/server dev",
     "dev:client": "pnpm --filter @catan/client dev",
+    "tunnel:ngrok": "ngrok http 5173",
+    "tunnel:tailscale": "tailscale funnel 5173",
     "build": "pnpm --recursive run build",
     "start": "node packages/server/dist/index.js",
     "test": "pnpm --recursive run test"

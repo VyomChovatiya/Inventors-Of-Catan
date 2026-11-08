@@ -15,29 +15,25 @@ interface BoardProps {
   myPlayerId: string | null;
 }
 
-const PLAYER_COLORS: Record<PlayerColor, { primary: string; secondary: string; shadow: string }> = {
-  red: { primary: '#ef4444', secondary: '#991b1b', shadow: '#450a0a' },
-  blue: { primary: '#3b82f6', secondary: '#1e40af', shadow: '#172554' },
-  orange: { primary: '#f97316', secondary: '#c2410c', shadow: '#431407' },
-  white: { primary: '#f8fafc', secondary: '#94a3b8', shadow: '#334155' },
-  green: { primary: '#22c55e', secondary: '#15803d', shadow: '#052e16' },
-  purple: { primary: '#a855f7', secondary: '#6b21a8', shadow: '#3b0764' },
+// High-saturation vibrant player colors
+const PLAYER_COLORS: Record<
+  PlayerColor,
+  { primary: string; secondary: string; border: string; door: string }
+> = {
+  red: { primary: '#ff1a1a', secondary: '#b91c1c', border: '#ffffff', door: '#fee2e2' },
+  blue: { primary: '#0055ff', secondary: '#1d4ed8', border: '#ffffff', door: '#dbeafe' },
+  orange: { primary: '#ff6a00', secondary: '#c2410c', border: '#ffffff', door: '#ffedd5' },
+  white: { primary: '#ffffff', secondary: '#cbd5e1', border: '#0f172a', door: '#334155' },
+  green: { primary: '#00cc44', secondary: '#15803d', border: '#ffffff', door: '#dcfce7' },
+  purple: { primary: '#aa00ff', secondary: '#6b21a8', border: '#ffffff', door: '#f3e8ff' },
 };
 
-const RESOURCE_EMOJI: Record<ResourceType, string> = {
-  wood: '🪵',
-  brick: '🧱',
-  wheat: '🌾',
-  sheep: '🐑',
-  ore: '🪨',
-};
-
-const RESOURCE_PORT_COLORS: Record<ResourceType, string> = {
-  wood: '#15803d',
-  brick: '#b91c1c',
-  wheat: '#ca8a04',
-  sheep: '#4d7c0f',
-  ore: '#475569',
+const RESOURCE_PORT_ASSETS: Record<ResourceType, { img: string; ringColor: string; label: string }> = {
+  wood: { img: '/assets/cards/wood.png', ringColor: '#16a34a', label: 'Lumber' },
+  brick: { img: '/assets/cards/brick.png', ringColor: '#dc2626', label: 'Brick' },
+  wheat: { img: '/assets/cards/wheat.png', ringColor: '#eab308', label: 'Grain' },
+  sheep: { img: '/assets/cards/wool.png', ringColor: '#65a30d', label: 'Wool' },
+  ore: { img: '/assets/cards/ore.png', ringColor: '#64748b', label: 'Ore' },
 };
 
 const NUMBER_PIPS: Record<number, number> = {
@@ -53,11 +49,19 @@ const NUMBER_PIPS: Record<number, number> = {
   12: 1,
 };
 
-export const Board: React.FC<BoardProps> = ({ state, myPlayerId }) => {
+interface PieceTooltip {
+  x: number;
+  y: number;
+  playerName: string;
+  playerColor: PlayerColor;
+  pieceLabel: string;
+}
+
+export const Board: React.FC<BoardProps> = React.memo(({ state, myPlayerId }) => {
   const { sendAction, activeBuildMode, setBuildMode } = useGameStore();
-  const [zoom, setZoom] = useState(1);
   const [hoveredVertex, setHoveredVertex] = useState<string | null>(null);
   const [hoveredEdge, setHoveredEdge] = useState<string | null>(null);
+  const [hoveredPiece, setHoveredPiece] = useState<PieceTooltip | null>(null);
 
   const isMyTurn =
     (state.phase === 'ACTION_PHASE' && state.currentTurnPlayerId === myPlayerId) ||
@@ -79,7 +83,7 @@ export const Board: React.FC<BoardProps> = ({ state, myPlayerId }) => {
       if (v.y < minY) minY = v.y;
       if (v.y > maxY) maxY = v.y;
     }
-    return { minX: minX - 135, maxX: maxX + 135, minY: minY - 125, maxY: maxY + 125 };
+    return { minX: minX - 140, maxX: maxX + 140, minY: minY - 130, maxY: maxY + 130 };
   }, [state.board.vertices]);
 
   const viewBox = `${minX} ${minY} ${maxX - minX} ${maxY - minY}`;
@@ -174,49 +178,29 @@ export const Board: React.FC<BoardProps> = ({ state, myPlayerId }) => {
     }
   };
 
+  const isRobberController = state.robberControllerPlayerId
+    ? state.robberControllerPlayerId === myPlayerId
+    : state.currentTurnPlayerId === myPlayerId || state.pairedPlayerId === myPlayerId;
+
   const handleHexClick = (hexId: string) => {
     if (!myPlayerId) return;
-    const canMoveRobber =
-      state.phase === 'ROBBER_PLACEMENT' &&
-      (state.currentTurnPlayerId === myPlayerId || state.pairedPlayerId === myPlayerId);
+    if (state.turnDeadlineMs && Date.now() >= state.turnDeadlineMs) return;
+    const canMoveRobber = state.phase === 'ROBBER_PLACEMENT' && isRobberController;
     if (canMoveRobber) {
       sendAction({ type: 'MOVE_ROBBER', playerId: myPlayerId, hexId });
     }
   };
 
   return (
-    <div className="relative w-full h-full flex items-center justify-center overflow-hidden bg-radial from-sky-950 via-slate-900 to-slate-950">
-      {/* Zoom Controls (Positioned cleanly at Top Right below top header height) */}
-      <div className="absolute top-20 right-4 z-20 flex flex-col gap-1.5 bg-slate-900/90 backdrop-blur-md p-1.5 rounded-2xl border border-slate-700/80 shadow-2xl">
-        <button
-          onClick={() => setZoom((z) => Math.min(1.6, z + 0.15))}
-          title="Zoom In"
-          className="w-8 h-8 flex items-center justify-center font-bold text-lg text-slate-200 hover:text-white hover:bg-slate-700 rounded-xl transition cursor-pointer"
-        >
-          +
-        </button>
-        <button
-          onClick={() => setZoom((z) => Math.max(0.6, z - 0.15))}
-          title="Zoom Out"
-          className="w-8 h-8 flex items-center justify-center font-bold text-lg text-slate-200 hover:text-white hover:bg-slate-700 rounded-xl transition cursor-pointer"
-        >
-          −
-        </button>
-        <button
-          onClick={() => setZoom(1)}
-          title="Reset Zoom"
-          className="w-8 h-8 flex items-center justify-center text-xs font-bold text-amber-400 hover:text-white hover:bg-slate-700 rounded-xl transition cursor-pointer"
-        >
-          1x
-        </button>
-      </div>
+    <div
+      className="relative w-full h-full flex items-center justify-center overflow-hidden bg-cover bg-center bg-no-repeat"
+      style={{ backgroundImage: "url('/assets/backgrounds/bg.jpg')" }}
+    >
+      {/* Subtle dark ocean vignette so board hexes and HUD pop crisply over the artwork */}
+      <div className="absolute inset-0 bg-slate-950/35 pointer-events-none" />
 
       {/* SVG Game Board */}
-      <svg
-        viewBox={viewBox}
-        className="w-full h-full transition-transform duration-300 ease-out drop-shadow-2xl"
-        style={{ transform: `scale(${zoom})` }}
-      >
+      <svg viewBox={viewBox} className="relative z-10 w-full h-full drop-shadow-2xl">
         <defs>
           {['forest', 'hills', 'fields', 'pasture', 'mountains', 'desert', 'sea'].map((t) => (
             <pattern
@@ -231,12 +215,25 @@ export const Board: React.FC<BoardProps> = ({ state, myPlayerId }) => {
             </pattern>
           ))}
 
-          <filter id="piece-shadow" x="-30%" y="-30%" width="160%" height="160%">
+          {/* Clip paths for harbor resource card circles */}
+          <clipPath id="harbor-circle-clip">
+            <circle cx="0" cy="0" r="18" />
+          </clipPath>
+
+          {/* CRITICAL FIX: filterUnits="userSpaceOnUse" prevents horizontal roads (dy=0) from being clipped to 0px height! */}
+          <filter
+            id="piece-shadow"
+            filterUnits="userSpaceOnUse"
+            x="-1000"
+            y="-1000"
+            width="2000"
+            height="2000"
+          >
             <feDropShadow dx="1.5" dy="3" stdDeviation="2.5" floodColor="#000" floodOpacity="0.65" />
           </filter>
         </defs>
 
-        {/* 1. Outer Harbors & Wooden Piers (Drawn outward in the sea away from board edges!) */}
+        {/* 1. Outer Harbors & Wooden Piers (Drawn outward in the sea with official resource card artwork!) */}
         <g id="harbors-layer" className="pointer-events-none select-none">
           {Object.values(state.board.harbors).map((harbor) => {
             const edge = state.board.edges[harbor.edgeId];
@@ -261,19 +258,18 @@ export const Board: React.FC<BoardProps> = ({ state, myPlayerId }) => {
               uy = edge.midY / len;
             }
 
-            // Harbor badge sits 44px outside the coastal edge in the ocean
-            const shipX = edge.midX + ux * 44;
-            const shipY = edge.midY + uy * 44;
+            // Harbor medallion sits 46px outside the coastal edge in the ocean
+            const shipX = edge.midX + ux * 46;
+            const shipY = edge.midY + uy * 46;
 
-            // Wooden pier endpoints extending from v1 and v2 into the sea toward the harbor ship
-            const pier1EndX = v1.x + (shipX - v1.x) * 0.65;
-            const pier1EndY = v1.y + (shipY - v1.y) * 0.65;
-            const pier2EndX = v2.x + (shipX - v2.x) * 0.65;
-            const pier2EndY = v2.y + (shipY - v2.y) * 0.65;
+            // Wooden pier endpoints extending from v1 and v2 into the sea toward the harbor medallion
+            const pier1EndX = v1.x + (shipX - v1.x) * 0.62;
+            const pier1EndY = v1.y + (shipY - v1.y) * 0.62;
+            const pier2EndX = v2.x + (shipX - v2.x) * 0.62;
+            const pier2EndY = v2.y + (shipY - v2.y) * 0.62;
 
             const is21 = harbor.ratio === 2 && harbor.resource;
-            const badgeFill = is21 ? RESOURCE_PORT_COLORS[harbor.resource!] : '#fef3c7';
-            const badgeTextFill = is21 ? '#ffffff' : '#1e293b';
+            const portAsset = is21 ? RESOURCE_PORT_ASSETS[harbor.resource!] : null;
 
             return (
               <g key={harbor.id} filter="url(#piece-shadow)">
@@ -283,8 +279,8 @@ export const Board: React.FC<BoardProps> = ({ state, myPlayerId }) => {
                   y1={v1.y}
                   x2={pier1EndX}
                   y2={pier1EndY}
-                  stroke="#78350f"
-                  strokeWidth="7"
+                  stroke="#5c2409"
+                  strokeWidth="8"
                   strokeLinecap="round"
                 />
                 <line
@@ -293,9 +289,9 @@ export const Board: React.FC<BoardProps> = ({ state, myPlayerId }) => {
                   x2={pier1EndX}
                   y2={pier1EndY}
                   stroke="#d97706"
-                  strokeWidth="4.5"
+                  strokeWidth="5"
                   strokeLinecap="round"
-                  strokeDasharray="3 3"
+                  strokeDasharray="3.5 3.5"
                 />
 
                 {/* Wooden Dock / Pier 2 from coastal vertex v2 */}
@@ -304,8 +300,8 @@ export const Board: React.FC<BoardProps> = ({ state, myPlayerId }) => {
                   y1={v2.y}
                   x2={pier2EndX}
                   y2={pier2EndY}
-                  stroke="#78350f"
-                  strokeWidth="7"
+                  stroke="#5c2409"
+                  strokeWidth="8"
                   strokeLinecap="round"
                 />
                 <line
@@ -314,28 +310,60 @@ export const Board: React.FC<BoardProps> = ({ state, myPlayerId }) => {
                   x2={pier2EndX}
                   y2={pier2EndY}
                   stroke="#d97706"
-                  strokeWidth="4.5"
+                  strokeWidth="5"
                   strokeLinecap="round"
-                  strokeDasharray="3 3"
+                  strokeDasharray="3.5 3.5"
                 />
 
-                {/* Harbor Ship / Sail Token in the Ocean */}
+                {/* Harbor Medallion with Actual Resource Card Artwork */}
                 <g transform={`translate(${shipX}, ${shipY})`}>
-                  {/* Outer wooden hull ring */}
-                  <circle r="20" fill="#451a03" stroke="#f59e0b" strokeWidth="2" />
-                  {/* Sail / Resource circle */}
-                  <circle r="16.5" fill={badgeFill} />
-                  {is21 ? (
+                  {/* Outer nautical gold & wood frame */}
+                  <circle
+                    r="22"
+                    fill="#3b1704"
+                    stroke={portAsset ? portAsset.ringColor : '#f59e0b'}
+                    strokeWidth="2.8"
+                  />
+                  <circle r="19" fill="#fef3c7" stroke="#b45309" strokeWidth="1.2" />
+
+                  {is21 && portAsset ? (
                     <>
-                      <text textAnchor="middle" dy="-2" fontSize="11">
-                        {RESOURCE_EMOJI[harbor.resource!]}
-                      </text>
+                      {/* Clipped actual official resource card illustration inside the port circle */}
+                      <g clipPath="url(#harbor-circle-clip)">
+                        <image
+                          href={portAsset.img}
+                          x="-22"
+                          y="-26"
+                          width="44"
+                          height="52"
+                          preserveAspectRatio="xMidYMid slice"
+                        />
+                        {/* Subtle dark vignette at bottom of circle for crisp ratio banner */}
+                        <rect x="-22" y="4" width="44" height="18" fill="rgba(15, 23, 42, 0.78)" />
+                      </g>
+                      <circle
+                        r="18"
+                        fill="none"
+                        stroke={portAsset.ringColor}
+                        strokeWidth="2"
+                      />
+                      {/* Ribbon Pill for 2:1 Ratio */}
+                      <rect
+                        x="-14"
+                        y="6"
+                        width="28"
+                        height="13"
+                        rx="6"
+                        fill="#0f172a"
+                        stroke="#fbbf24"
+                        strokeWidth="1.4"
+                      />
                       <text
                         textAnchor="middle"
-                        dy="11"
+                        y="15.5"
                         fontSize="9.5"
                         fontWeight="900"
-                        fill={badgeTextFill}
+                        fill="#fef08a"
                         fontFamily="sans-serif"
                       >
                         2:1
@@ -343,25 +371,72 @@ export const Board: React.FC<BoardProps> = ({ state, myPlayerId }) => {
                     </>
                   ) : (
                     <>
+                      {/* 3:1 Any-Resource Merchant Sail Medallion */}
+                      <circle r="17.5" fill="#fef3c7" />
+                      {/* Mini fan of resource cards icon */}
+                      <g transform="translate(0, -5)">
+                        <rect
+                          x="-9"
+                          y="-7"
+                          width="7"
+                          height="10"
+                          rx="1.5"
+                          transform="rotate(-18)"
+                          fill="#22c55e"
+                          stroke="#14532d"
+                          strokeWidth="0.8"
+                        />
+                        <rect
+                          x="-3.5"
+                          y="-8"
+                          width="7"
+                          height="10"
+                          rx="1.5"
+                          fill="#eab308"
+                          stroke="#713f12"
+                          strokeWidth="0.8"
+                        />
+                        <rect
+                          x="2"
+                          y="-7"
+                          width="7"
+                          height="10"
+                          rx="1.5"
+                          transform="rotate(18)"
+                          fill="#ef4444"
+                          stroke="#7f1d1d"
+                          strokeWidth="0.8"
+                        />
+                        <text
+                          textAnchor="middle"
+                          y="0"
+                          fontSize="8"
+                          fontWeight="900"
+                          fill="#0f172a"
+                          fontFamily="sans-serif"
+                        >
+                          ?
+                        </text>
+                      </g>
+                      <rect
+                        x="-14"
+                        y="6"
+                        width="28"
+                        height="13"
+                        rx="6"
+                        fill="#78350f"
+                        stroke="#fbbf24"
+                        strokeWidth="1.4"
+                      />
                       <text
                         textAnchor="middle"
-                        dy="1"
-                        fontSize="11"
+                        y="15.5"
+                        fontSize="9.5"
                         fontWeight="900"
-                        fill={badgeTextFill}
+                        fill="#ffffff"
                         fontFamily="sans-serif"
                       >
                         3:1
-                      </text>
-                      <text
-                        textAnchor="middle"
-                        dy="10"
-                        fontSize="7"
-                        fontWeight="700"
-                        fill="#78350f"
-                        fontFamily="sans-serif"
-                      >
-                        PORT
                       </text>
                     </>
                   )}
@@ -380,7 +455,8 @@ export const Board: React.FC<BoardProps> = ({ state, myPlayerId }) => {
 
             const isRobberTarget =
               state.phase === 'ROBBER_PLACEMENT' &&
-              (state.currentTurnPlayerId === myPlayerId || state.pairedPlayerId === myPlayerId) &&
+              isRobberController &&
+              (!state.turnDeadlineMs || Date.now() < state.turnDeadlineMs) &&
               tile.id !== state.board.robberHexId;
 
             return (
@@ -467,13 +543,12 @@ export const Board: React.FC<BoardProps> = ({ state, myPlayerId }) => {
             );
           })}
 
-          {/* New Robber Figurine */}
+          {/* Custom Robber Figurine */}
           {state.board.robberHexId &&
             (() => {
               const rHex = state.board.hexes[state.board.robberHexId];
               if (!rHex) return null;
               const rCenter = hexToPixel({ q: rHex.q, r: rHex.r, s: rHex.s }, HEX_RADIUS);
-              // Offset slightly if on a numbered tile so the number is still readable
               const offsetX = rHex.number ? 16 : 0;
               const offsetY = rHex.number ? -6 : 0;
               return (
@@ -515,14 +590,39 @@ export const Board: React.FC<BoardProps> = ({ state, myPlayerId }) => {
               const y2 = v2.y - dy * 0.12;
 
               return (
-                <g key={edge.id} filter="url(#piece-shadow)" className="pointer-events-none">
+                <g
+                  key={edge.id}
+                  filter="url(#piece-shadow)"
+                  className="cursor-pointer"
+                  onMouseEnter={() =>
+                    player &&
+                    setHoveredPiece({
+                      x: edge.midX,
+                      y: edge.midY - 14,
+                      playerName: player.name,
+                      playerColor: player.color,
+                      pieceLabel: 'Road',
+                    })
+                  }
+                  onMouseLeave={() => setHoveredPiece(null)}
+                >
+                  {/* Transparent hit target for smooth hover tooltip */}
+                  <line
+                    x1={v1.x}
+                    y1={v1.y}
+                    x2={v2.x}
+                    y2={v2.y}
+                    stroke="transparent"
+                    strokeWidth="18"
+                    strokeLinecap="round"
+                  />
                   <line
                     x1={x1}
                     y1={y1}
                     x2={x2}
                     y2={y2}
-                    stroke="#ffffff"
-                    strokeWidth="10.5"
+                    stroke={colorInfo.border}
+                    strokeWidth="11"
                     strokeLinecap="round"
                   />
                   <line
@@ -531,7 +631,7 @@ export const Board: React.FC<BoardProps> = ({ state, myPlayerId }) => {
                     x2={x2}
                     y2={y2}
                     stroke={colorInfo.primary}
-                    strokeWidth="7.5"
+                    strokeWidth="8"
                     strokeLinecap="round"
                   />
                 </g>
@@ -617,7 +717,18 @@ export const Board: React.FC<BoardProps> = ({ state, myPlayerId }) => {
                   transform={`translate(${vertex.x}, ${vertex.y})`}
                   filter="url(#piece-shadow)"
                   onClick={() => isCityUpgradable && handleVertexClick(vertex.id)}
-                  className={isCityUpgradable ? 'cursor-pointer' : 'pointer-events-none'}
+                  onMouseEnter={() =>
+                    player &&
+                    setHoveredPiece({
+                      x: vertex.x,
+                      y: vertex.y - 20,
+                      playerName: player.name,
+                      playerColor: player.color,
+                      pieceLabel: building.type === 'city' ? 'City (2 VP)' : 'Settlement (1 VP)',
+                    })
+                  }
+                  onMouseLeave={() => setHoveredPiece(null)}
+                  className="cursor-pointer"
                 >
                   {isJustPlacedInSetup && (
                     <circle
@@ -630,24 +741,24 @@ export const Board: React.FC<BoardProps> = ({ state, myPlayerId }) => {
                     />
                   )}
                   {building.type === 'settlement' ? (
-                    <g transform="translate(-10, -12)">
+                    <g transform="translate(-11, -12)">
                       <polygon
-                        points="10,0 20,9 20,20 0,20 0,9"
+                        points="11,0 22,9 22,21 0,21 0,9"
                         fill={colorInfo.primary}
-                        stroke="#fff"
-                        strokeWidth="1.8"
+                        stroke={colorInfo.border}
+                        strokeWidth="2"
                       />
-                      <rect x="7" y="11" width="6" height="9" fill="#f8fafc" />
+                      <rect x="8" y="11" width="6" height="10" fill={colorInfo.door} />
                     </g>
                   ) : (
                     <g transform="translate(-14, -15)">
                       <polygon
                         points="14,0 20,6 20,8 28,8 28,26 0,26 0,8 8,8 8,6"
                         fill={colorInfo.primary}
-                        stroke="#fff"
-                        strokeWidth="1.8"
+                        stroke={colorInfo.border}
+                        strokeWidth="2"
                       />
-                      <rect x="10" y="14" width="8" height="12" fill="#f8fafc" />
+                      <rect x="10" y="14" width="8" height="12" fill={colorInfo.door} />
                     </g>
                   )}
                   {isCityUpgradable && (
@@ -692,7 +803,46 @@ export const Board: React.FC<BoardProps> = ({ state, myPlayerId }) => {
             return null;
           })}
         </g>
+
+        {/* 6. Floating SVG Tooltip when hovering any Road, Settlement, or City */}
+        {hoveredPiece && (
+          <g
+            transform={`translate(${hoveredPiece.x}, ${hoveredPiece.y})`}
+            className="pointer-events-none select-none"
+            filter="url(#piece-shadow)"
+          >
+            <rect
+              x="-75"
+              y="-28"
+              width="150"
+              height="24"
+              rx="8"
+              fill="#0f172a"
+              stroke={PLAYER_COLORS[hoveredPiece.playerColor].primary}
+              strokeWidth="2"
+            />
+            <circle
+              cx="-61"
+              cy="-16"
+              r="5"
+              fill={PLAYER_COLORS[hoveredPiece.playerColor].primary}
+              stroke="#ffffff"
+              strokeWidth="1"
+            />
+            <text
+              x="4"
+              y="-12.5"
+              textAnchor="middle"
+              fontSize="9.5"
+              fontWeight="800"
+              fill="#f8fafc"
+              fontFamily="sans-serif"
+            >
+              {hoveredPiece.playerName}&apos;s {hoveredPiece.pieceLabel}
+            </text>
+          </g>
+        )}
       </svg>
     </div>
   );
-};
+});
