@@ -411,6 +411,9 @@ io.on('connection', (socket) => {
       const sanitizedRoom = roomManager.sanitizeRoomForClient(res.room);
       callback?.({ success: true, room: sanitizedRoom });
       broadcastRoomUpdated(res.room.code);
+      if (res.room.gameState) {
+        broadcastGameState(res.room.code);
+      }
       broadcastPublicRooms();
     } catch (e: any) {
       callback?.({ success: false, error: e.message });
@@ -532,6 +535,9 @@ io.on('connection', (socket) => {
       const sanitizedRoom = roomManager.sanitizeRoomForClient(res.room);
       callback?.({ success: true, room: sanitizedRoom });
       broadcastRoomUpdated(res.room.code);
+      if (res.room.gameState) {
+        broadcastGameState(res.room.code);
+      }
       broadcastPublicRooms();
     } catch (e: any) {
       callback?.({ success: false, error: e.message });

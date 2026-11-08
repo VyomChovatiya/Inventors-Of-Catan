@@ -6,7 +6,7 @@ import {
   rollOrdinaryDice,
   THEORETICAL_TWO_DICE_COUNTS,
 } from './engine.js';
-import { applyAction, handleTurnTimeout } from './actions.js';
+import { applyAction, handleTurnTimeout, removePlayerFromGame } from './actions.js';
 import { calculatePlayerLongestRoute } from './longestRoute.js';
 import { generateBoard, hasAdjacentRedNumbers } from '../board/generator.js';
 
@@ -575,5 +575,69 @@ describe('Catan Rules Engine & Security Validation Suite', () => {
     // Sum 7 expected 6,000 times out of 36,000 rolls
     expect(sumCounts[7]).toBeGreaterThan(5600);
     expect(sumCounts[7]).toBeLessThan(6400);
+  });
+
+  it('returns kicked player resources, dev cards, buildings, and roads to the bank and continues the match', () => {
+    const game = initializeGame(
+      'test_kick_midgame',
+      [
+        { id: 'p1', name: 'Alice', color: 'red' },
+        { id: 'p2', name: 'Bob', color: 'blue' },
+        { id: 'p3', name: 'Charlie', color: 'orange' },
+      ],
+      false,
+      10,
+      undefined,
+      { randomizeTurnOrder: false },
+    );
+
+    game.phase = 'ACTION_PHASE';
+    game.currentTurnPlayerId = 'p2';
+
+    const initialDeckCount = game.devCardDeck.length;
+    const drawnCard1 = game.devCardDeck.pop()!;
+    const drawnCard2 = game.devCardDeck.pop()!;
+    game.players.p2.devCards.push(drawnCard1);
+    game.players.p2.playedDevCards.push(drawnCard2);
+
+    game.resourceBank.wood = 10;
+    game.resourceBank.brick = 10;
+    game.players.p2.resources = { wood: 4, brick: 3, wheat: 0, sheep: 0, ore: 0 };
+
+    const vId = Object.keys(game.board.vertices)[0];
+    const eId = Object.keys(game.board.edges)[0];
+    game.board.buildings[vId] = {
+      id: `b_${vId}`,
+      type: 'settlement',
+      playerId: 'p2',
+      vertexId: vId,
+    };
+    game.board.roads[eId] = {
+      id: `r_${eId}`,
+      playerId: 'p2',
+      edgeId: eId,
+    };
+
+    const res = removePlayerFromGame(game, 'p2');
+    expect(res.success).toBe(true);
+
+    // p2 removed from players and playerOrder
+    expect(game.players.p2).toBeUndefined();
+    expect(game.playerOrder).toEqual(['p1', 'p3']);
+
+    // Resources returned to bank
+    expect(game.resourceBank.wood).toBe(14);
+    expect(game.resourceBank.brick).toBe(13);
+
+    // Dev cards returned to deck
+    expect(game.devCardDeck.length).toBe(initialDeckCount);
+
+    // Buildings & roads removed from board
+    expect(game.board.buildings[vId]).toBeUndefined();
+    expect(game.board.roads[eId]).toBeUndefined();
+
+    // Turn advanced to the next player in order (p3) at TURN_START
+    expect(game.currentTurnPlayerId).toBe('p3');
+    expect(game.phase).toBe('TURN_START');
   });
 });

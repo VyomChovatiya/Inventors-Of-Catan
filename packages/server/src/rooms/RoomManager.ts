@@ -18,6 +18,7 @@ import {
   hasAdjacentRedNumbers,
   initializeGame,
   redactStateForPlayer,
+  removePlayerFromGame,
 } from '@catan/shared';
 
 export interface RoomPlayer {
@@ -446,13 +447,17 @@ export class RoomManager {
     if (authenticatedPlayerId === targetPlayerId) {
       return { success: false, error: 'Host cannot kick themselves.' };
     }
-    if (room.gameState) {
-      return { success: false, error: 'Cannot kick players after the match has started.' };
-    }
 
     const target = room.players[targetPlayerId];
     if (!target) {
-      return { success: false, error: 'Player not found in lobby.' };
+      return { success: false, error: 'Player not found in room.' };
+    }
+
+    if (room.gameState) {
+      const removeRes = removePlayerFromGame(room.gameState, targetPlayerId);
+      if (!removeRes.success) {
+        return { success: false, error: removeRes.error };
+      }
     }
 
     const kickedSocketId = target.socketId;

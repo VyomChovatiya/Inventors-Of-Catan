@@ -30,7 +30,7 @@ import {
   drawBalancedDiceRoll,
 } from './engine.js';
 import { updateLongestRouteOwner } from './longestRoute.js';
-import { cryptoRandomInt } from '../board/generator.js';
+import { cryptoRandomInt, shuffle } from '../board/generator.js';
 
 export type GameAction =
   | { type: 'BUILD_SETUP_SETTLEMENT'; playerId: string; vertexId: string }
@@ -1636,4 +1636,247 @@ export function getPlayerMaritimeRatio(playerId: string, resource: ResourceType,
   }
 
   return best;
+}
+
+/**
+ * Removes a player mid-game, returning all of their resources, development cards (unplayed and played),
+ * settlements, cities, and roads back to the bank/deck and continuing the match seamlessly as if they
+ * were never playing.
+ */
+export function removePlayerFromGame(
+  state: GameState,
+  targetPlayerId: string,
+): { success: boolean; error?: string } {
+  const target = state.players[targetPlayerId];
+  if (!target) {
+    return { success: false, error: 'Player not found in active game.' };
+  }
+
+  const orderedBefore = getOrderedPlayerIds(state);
+  if (orderedBefore.length <= 1) {
+    return { success: false, error: 'Cannot remove the last remaining player.' };
+  }
+
+  const kickedOrderIdx = orderedBefore.indexOf(targetPlayerId);
+  const kickedName = target.name;
+
+  // 1. Return all resources held by the player back to the resourceBank
+  for (const res of VALID_RESOURCES) {
+    const amt = target.resources[res] || 0;
+    if (amt > 0) {
+      state.resourceBank[res] = (state.resourceBank[res] || 0) + amt;
+    }
+    target.resources[res] = 0;
+  }
+
+  // 2. Return all unplayed and played Development Cards back into devCardDeck and reshuffle
+  const returnedDevCards = [
+    ...(target.devCards || []),
+    ...(target.playedDevCards || []),
+  ].map((card) => ({
+    id: card.id,
+    type: card.type,
+    ...(card.vpName ? { vpName: card.vpName } : {}),
+  }));
+
+  if (returnedDevCards.length > 0) {
+    state.devCardDeck = shuffle([...state.devCardDeck, ...returnedDevCards]);
+  }
+  target.devCards = [];
+  target.playedDevCards = [];
+
+  // 3. Remove all settlements, cities, and roads owned by the kicked player from the board
+  for (const [vid, building] of Object.entries(state.board.buildings)) {
+    if (building.playerId === targetPlayerId) {
+      delete state.board.buildings[vid];
+    }
+  }
+  for (const [eid, road] of Object.entries(state.board.roads)) {
+    if (road.playerId === targetPlayerId) {
+      delete state.board.roads[eid];
+    }
+  }
+
+  // 4. Remove player from state.players and state.playerOrder, and re-index seatIndex
+  delete state.players[targetPlayerId];
+  state.playerOrder = orderedBefore.filter((id) => id !== targetPlayerId);
+  state.playerOrder.forEach((pid, idx) => {
+    if (state.players[pid]) {
+      state.players[pid].seatIndex = idx;
+    }
+  });
+
+  state.settings.pairedPlayersTurn =
+    state.settings.maxPlayers === 6 && state.playerOrder.length >= 5;
+
+  // 5. Recompute Largest Army if the kicked player held it
+  if (state.largestArmyOwnerId === targetPlayerId) {
+    let bestPlayerId: string | null = null;
+    let bestKnights = 2; // Need at least 3 knights
+    let tie = false;
+
+    for (const pid of state.playerOrder) {
+      const p = state.players[pid];
+      if (!p) continue;
+      if (p.playedKnightsCount > bestKnights) {
+        bestKnights = p.playedKnightsCount;
+        bestPlayerId = pid;
+        tie = false;
+      } else if (p.playedKnightsCount === bestKnights && bestPlayerId !== null) {
+        tie = true;
+      }
+    }
+
+    state.largestArmyOwnerId = !tie ? bestPlayerId : null;
+    for (const p of Object.values(state.players)) {
+      p.hasLargestArmy = p.id === state.largestArmyOwnerId;
+    }
+  }
+
+  // 6. Recompute Longest Road across remaining players (removing roads/buildings can change routes)
+  if (state.longestRouteOwnerId === targetPlayerId) {
+    state.longestRouteOwnerId = null;
+  }
+  evaluateAndNotifyLongestRoute(state);
+
+  // 7. Clean up active trade offers involving the kicked player
+  if (state.activeTradeOffer) {
+    if (state.activeTradeOffer.fromPlayerId === targetPlayerId) {
+      state.activeTradeOffer = null;
+    } else {
+      delete state.activeTradeOffer.status[targetPlayerId];
+      state.activeTradeOffer.counterOffers = state.activeTradeOffer.counterOffers.filter(
+        (c) => c.fromPlayerId !== targetPlayerId,
+      );
+      const remainingStatuses = Object.values(state.activeTradeOffer.status);
+      if (
+        remainingStatuses.length > 0 &&
+        remainingStatuses.every((s) => s === 'declined') &&
+        state.activeTradeOffer.counterOffers.length === 0
+      ) {
+        state.activeTradeOffer = null;
+      }
+    }
+  }
+
+  // 8. Clean up pending discards & steal targets
+  delete state.pendingDiscards[targetPlayerId];
+  state.pendingStealTargets = state.pendingStealTargets.filter((id) => id !== targetPlayerId);
+
+  // 9. Adjust Setup Turn Order or Active Turn Progression
+  if (state.phase === 'SETUP_ROUND_1' || state.phase === 'SETUP_ROUND_2') {
+    const wasActiveSetupTurn = state.setupTurnOrder[state.setupTurnIndex] === targetPlayerId;
+    let removedBeforeCurrent = 0;
+    for (let i = 0; i < state.setupTurnIndex && i < state.setupTurnOrder.length; i++) {
+      if (state.setupTurnOrder[i] === targetPlayerId) {
+        removedBeforeCurrent++;
+      }
+    }
+    state.setupTurnOrder = state.setupTurnOrder.filter((id) => id !== targetPlayerId);
+    state.setupTurnIndex = Math.max(0, state.setupTurnIndex - removedBeforeCurrent);
+
+    if (wasActiveSetupTurn) {
+      state.lastSetupVertexId = null;
+    }
+
+    if (state.setupTurnIndex >= state.setupTurnOrder.length) {
+      // Setup rounds finished; start Turn 1
+      state.phase = 'TURN_START';
+      state.currentTurnPlayerId = state.playerOrder[0];
+      state.pairedPlayerId = state.settings.pairedPlayersTurn
+        ? getPairedPlayerId(state.currentTurnPlayerId, state.playerOrder)
+        : undefined;
+      state.diceRolledThisTurn = false;
+      state.devCardPlayedThisTurn = false;
+      refreshTurnTimer(state);
+    } else {
+      state.phase =
+        state.setupTurnIndex >= state.playerOrder.length ? 'SETUP_ROUND_2' : 'SETUP_ROUND_1';
+      state.currentTurnPlayerId = state.setupTurnOrder[state.setupTurnIndex];
+      if (wasActiveSetupTurn) {
+        refreshTurnTimer(state);
+      }
+    }
+  } else if (state.phase !== 'GAME_OVER') {
+    // Non-setup phases
+    const wasCurrentTurnPlayer = state.currentTurnPlayerId === targetPlayerId;
+    const wasPairedTurnPlayer =
+      state.phase === 'PAIRED_ACTION_PHASE' && state.pairedPlayerId === targetPlayerId;
+    const wasRobberController = state.robberControllerPlayerId === targetPlayerId;
+
+    if (wasCurrentTurnPlayer) {
+      const nextIdx =
+        kickedOrderIdx >= 0 && state.playerOrder.length > 0
+          ? kickedOrderIdx % state.playerOrder.length
+          : 0;
+      state.currentTurnPlayerId = state.playerOrder[nextIdx];
+      state.pairedPlayerId = state.settings.pairedPlayersTurn
+        ? getPairedPlayerId(state.currentTurnPlayerId, state.playerOrder)
+        : undefined;
+      state.phase = 'TURN_START';
+      state.diceRolledThisTurn = false;
+      state.devCardPlayedThisTurn = false;
+      state.freeRoadsRemaining = 0;
+      state.savedActionRemainingMs = null;
+      state.robberControllerPlayerId = null;
+      state.pendingDiscards = {};
+      state.pendingStealTargets = [];
+      state.activeTradeOffer = null;
+      refreshTurnTimer(state);
+    } else if (wasPairedTurnPlayer) {
+      const currIdx = state.playerOrder.indexOf(state.currentTurnPlayerId);
+      const nextP1Idx = currIdx >= 0 ? (currIdx + 1) % state.playerOrder.length : 0;
+      state.currentTurnPlayerId = state.playerOrder[nextP1Idx];
+      state.pairedPlayerId = state.settings.pairedPlayersTurn
+        ? getPairedPlayerId(state.currentTurnPlayerId, state.playerOrder)
+        : undefined;
+      state.phase = 'TURN_START';
+      state.diceRolledThisTurn = false;
+      state.devCardPlayedThisTurn = false;
+      state.freeRoadsRemaining = 0;
+      state.savedActionRemainingMs = null;
+      state.robberControllerPlayerId = null;
+      refreshTurnTimer(state);
+    } else {
+      if (state.settings.pairedPlayersTurn) {
+        state.pairedPlayerId = getPairedPlayerId(state.currentTurnPlayerId, state.playerOrder);
+      } else {
+        state.pairedPlayerId = undefined;
+      }
+
+      if (state.phase === 'DISCARD_PHASE' && Object.keys(state.pendingDiscards).length === 0) {
+        state.phase = 'ROBBER_PLACEMENT';
+        state.robberControllerPlayerId = state.currentTurnPlayerId;
+        refreshTurnTimer(state);
+      } else if (
+        (state.phase === 'ROBBER_PLACEMENT' || state.phase === 'ROBBER_STEAL') &&
+        wasRobberController
+      ) {
+        state.robberControllerPlayerId = null;
+        state.pendingStealTargets = [];
+        state.phase = state.diceRolledThisTurn ? 'ACTION_PHASE' : 'TURN_START';
+        resumeNormalTurnTimer(state);
+      } else if (state.phase === 'ROBBER_STEAL' && state.pendingStealTargets.length === 0) {
+        const resumePhase =
+          state.pairedPlayerId && state.robberControllerPlayerId === state.pairedPlayerId
+            ? 'PAIRED_ACTION_PHASE'
+            : state.diceRolledThisTurn
+              ? 'ACTION_PHASE'
+              : 'TURN_START';
+        state.robberControllerPlayerId = null;
+        state.phase = resumePhase;
+        resumeNormalTurnTimer(state);
+      }
+    }
+  }
+
+  state.actionLog.push({
+    id: `log_${Date.now()}_${Math.random()}`,
+    timestamp: Date.now(),
+    message: `🚫 ${kickedName} was removed by the host. Their resources, development cards, and pieces were returned to the bank.`,
+    category: 'system',
+  });
+
+  syncPlayerVPs(state);
+  return { success: true };
 }

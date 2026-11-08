@@ -81,6 +81,7 @@ interface GameStoreState {
   kickPlayer: (targetPlayerId: string) => Promise<boolean>;
   deleteRoom: (targetCode?: string) => Promise<boolean>;
   leaveRoom: () => Promise<boolean>;
+  exitToHomeScreen: () => void;
   changeColor: (color: PlayerColor) => Promise<boolean>;
   changePlayerName: (name: string) => Promise<boolean>;
   randomizeLobbyBoard: () => Promise<boolean>;
@@ -396,6 +397,20 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
         }
       });
     });
+  },
+
+  exitToHomeScreen: () => {
+    sessionStorage.removeItem('catan_last_room');
+    const url = new URL(window.location.href);
+    url.searchParams.delete('room');
+    window.history.pushState({}, '', url.toString());
+    set({
+      room: null,
+      gameState: null,
+      activeBuildMode: 'none',
+      errorMessage: null,
+    });
+    get().refreshRooms();
   },
 
   changeColor: async (color) => {

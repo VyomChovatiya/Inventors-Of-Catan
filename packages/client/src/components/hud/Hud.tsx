@@ -27,6 +27,8 @@ import {
   Send,
   EyeOff,
   BellRing,
+  Home,
+  UserMinus,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 
@@ -466,6 +468,8 @@ export const Hud: React.FC<HudProps> = ({ state, myPlayerId }) => {
   const {
     sendAction,
     sendChatMessage,
+    kickPlayer,
+    exitToHomeScreen,
     activeBuildMode,
     setBuildMode,
     errorMessage,
@@ -473,6 +477,7 @@ export const Hud: React.FC<HudProps> = ({ state, myPlayerId }) => {
     room,
   } = useGameStore();
   const chatMessages = room?.chatMessages || [];
+  const isHost = Boolean(room && myPlayerId && room.hostPlayerId === myPlayerId);
 
   const [discardSelection, setDiscardSelection] = useState<Record<ResourceType, number>>({
     wood: 0,
@@ -920,6 +925,17 @@ export const Hud: React.FC<HudProps> = ({ state, myPlayerId }) => {
                         </span>
                       )}
                     </span>
+
+                    {isHost && !isMe && orderedPlayers.length > 1 && state.phase !== 'GAME_OVER' && (
+                      <button
+                        type="button"
+                        onClick={() => kickPlayer(p.id)}
+                        title={`Kick ${p.name} (returns their resources, Dev Cards & buildings to the bank)`}
+                        className="p-1 bg-rose-950/90 hover:bg-rose-600 text-rose-300 hover:text-white border border-rose-700/80 rounded-lg transition cursor-pointer"
+                      >
+                        <UserMinus className="w-3 h-3" />
+                      </button>
+                    )}
                   </div>
                 </div>
               );
@@ -1211,6 +1227,17 @@ export const Hud: React.FC<HudProps> = ({ state, myPlayerId }) => {
               </button>
             )}
 
+            {/* Exit to Home Screen Button when Game Ends */}
+            {state.phase === 'GAME_OVER' && (
+              <button
+                type="button"
+                onClick={exitToHomeScreen}
+                className="flex items-center gap-1.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-black text-xs px-4 py-2 rounded-xl shadow-lg transition active:scale-95 cursor-pointer"
+              >
+                <Home className="w-4 h-4" /> Exit to Home Screen
+              </button>
+            )}
+
             {/* Improvement #15: Dice Statistics Positioned to the Right of Dice Controls, Minimized by Default */}
             <div className="relative">
               <button
@@ -1341,6 +1368,60 @@ export const Hud: React.FC<HudProps> = ({ state, myPlayerId }) => {
 
         {/* MIDDLE FLOATING ALERTS & MODALS */}
         <div className="flex flex-col items-center gap-3 my-auto">
+          {/* Game Over Victory Card with Exit to Home Screen Button */}
+          {state.phase === 'GAME_OVER' && (
+            <div className="pointer-events-auto bg-slate-900/95 border-2 border-amber-400 rounded-3xl p-6 shadow-2xl backdrop-blur-2xl flex flex-col items-center gap-4 max-w-md w-full text-center">
+              <div className="w-14 h-14 rounded-2xl bg-amber-500/20 border-2 border-amber-400 flex items-center justify-center">
+                <Trophy className="w-8 h-8 text-amber-400" />
+              </div>
+              <div className="flex flex-col gap-1">
+                <span className="text-xs font-black text-amber-400 uppercase tracking-widest">
+                  Victory Claimed!
+                </span>
+                <h2 className="text-2xl font-black text-white">
+                  {state.winnerId && state.players[state.winnerId]
+                    ? `${state.players[state.winnerId].name} Wins!`
+                    : 'Match Complete!'}
+                </h2>
+                {state.winnerId && state.players[state.winnerId] && (
+                  <span className="text-xs font-bold text-slate-300">
+                    Reached {state.players[state.winnerId].victoryPoints} Victory Points
+                  </span>
+                )}
+              </div>
+
+              <div className="w-full flex flex-col gap-1.5 bg-slate-950/85 p-3 rounded-2xl border border-slate-800">
+                {[...orderedPlayers]
+                  .sort((a, b) => b.victoryPoints - a.victoryPoints)
+                  .map((p, idx) => (
+                    <div
+                      key={p.id}
+                      className="flex items-center justify-between px-2.5 py-1.5 rounded-xl bg-slate-900/80 border border-slate-800 text-xs"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono font-bold text-slate-400">#{idx + 1}</span>
+                        <span
+                          className={`w-3 h-3 rounded-full border border-white/40 ${PLAYER_BADGES[p.color]}`}
+                        />
+                        <span className="font-bold text-white">
+                          {p.name} {p.id === myPlayerId && '(You)'}
+                        </span>
+                      </div>
+                      <span className="font-black text-amber-400">{p.victoryPoints} VP</span>
+                    </div>
+                  ))}
+              </div>
+
+              <button
+                type="button"
+                onClick={exitToHomeScreen}
+                className="w-full py-3.5 px-6 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-black text-sm rounded-2xl shadow-xl transition flex items-center justify-center gap-2 active:scale-95 cursor-pointer"
+              >
+                <Home className="w-4 h-4" /> Exit to Home Screen
+              </button>
+            </div>
+          )}
+
           {errorMessage && (
             <div className="pointer-events-auto bg-rose-950/95 border-2 border-rose-500 text-rose-100 px-5 py-2.5 rounded-2xl shadow-2xl flex items-center gap-2.5 text-xs font-bold backdrop-blur-md">
               <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
