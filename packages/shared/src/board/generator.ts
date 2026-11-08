@@ -66,10 +66,10 @@ export const BASE_HARBORS: HarborType[] = [
   'ore_2_1',
   'generic_3_1',
   'sheep_2_1',
-  'generic_3_1',
-  'generic_3_1',
   'brick_2_1',
+  'generic_3_1',
   'wood_2_1',
+  'generic_3_1',
 ];
 
 /**
