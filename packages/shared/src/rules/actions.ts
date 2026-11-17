@@ -1,42 +1,110 @@
 import {
   BoardState,
+  CommodityCount,
+  CommodityType,
+  CounterOffer,
   GameState,
+  ProgressCardDiscipline,
   ResourceCount,
   ResourceType,
   TradeOffer,
-  CounterOffer,
+  TradePayload,
+  TradeableCardType,
 } from '../types/index.js';
 import {
   BUILDING_COSTS,
+  DISCIPLINE_COMMODITY,
+  VALID_COMMODITIES,
   VALID_RESOURCES,
-  canAfford,
-  deductCost,
+  VALID_TRADEABLES,
   addResources,
+  addTradePayloadToPlayer,
+  canAfford,
+  canAffordTradePayload,
+  deductCost,
+  deductTradePayloadFromPlayer,
+  isValidCommodityType,
+  isValidDiscipline,
   isValidResourcePayload,
   isValidResourceType,
+  isValidTradePayload,
+  isValidTradeableType,
+  sumCommodities,
   sumResources,
+  sumTradePayload,
 } from './costs.js';
 import {
+  drawBalancedDiceRoll,
+  evaluateAndNotifyHarborMaster,
+  getNormalTurnDurationMs,
+  getOrderedPlayerIds,
+  getPairedPlayerId,
+  isValidRoadEdge,
+  isValidRobberHex,
+  isValidSettlementVertex,
+  pauseNormalTurnTimer,
+  refreshTurnTimer,
+  resumeNormalTurnTimer,
+  rollOrdinaryDice,
   satisfiesDistanceRule,
   syncPlayerVPs,
-  getPairedPlayerId,
-  getOrderedPlayerIds,
-  refreshTurnTimer,
-  pauseNormalTurnTimer,
-  resumeNormalTurnTimer,
-  isValidRoadEdge,
-  isValidSettlementVertex,
-  rollOrdinaryDice,
-  drawBalancedDiceRoll,
 } from './engine.js';
+import {
+  CITY_IMPROVEMENT_NAMES,
+  PROGRESS_CARD_METADATA,
+  drawProgressCardForPlayer,
+  getPlayerDiscardLimit,
+  getPlayerVulnerableCityVertices,
+  getReachableKnightVertices,
+  isOpenRoadEdge,
+  isValidKnightRecruitVertex,
+  pillageCityAtVertex,
+  resolveCKProduction,
+  resolveEventDie,
+  rollEventDie,
+} from './citiesAndKnights.js';
 import { updateLongestRouteOwner } from './longestRoute.js';
 import { cryptoRandomInt, shuffle } from '../board/generator.js';
+
+export interface PlayProgressCardOptions {
+  // Alchemy
+  alchemyDice?: [number, number];
+  // Engineering
+  cityVertexId?: string;
+  // Invention
+  swapHexIds?: [string, string];
+  // Smithing
+  knightVertexIds?: string[];
+  // Merchant / Taxation
+  hexId?: string;
+  // Merchant Fleet
+  tradeableType?: TradeableCardType;
+  // Resource Monopoly
+  resource?: ResourceType;
+  // Trade Monopoly
+  commodity?: CommodityType;
+  // Diplomacy
+  edgeId?: string;
+  // Intrigue
+  knightVertexId?: string;
+  // Guild Dues / Espionage / Treason
+  targetPlayerId?: string;
+  chosenCards?: TradeableCardType[];
+  stolenCardId?: string;
+  // Commercial Harbor
+  commercialHarborOffers?: Array<{ targetPlayerId: string; offeredResource: ResourceType }>;
+}
 
 export type GameAction =
   | { type: 'BUILD_SETUP_SETTLEMENT'; playerId: string; vertexId: string }
   | { type: 'BUILD_SETUP_ROAD'; playerId: string; edgeId: string }
   | { type: 'ROLL_DICE'; playerId: string }
-  | { type: 'DISCARD_CARDS'; playerId: string; resources: Partial<ResourceCount> }
+  | {
+      type: 'DISCARD_CARDS';
+      playerId: string;
+      resources: TradePayload;
+      commodities?: Partial<CommodityCount>;
+    }
   | { type: 'MOVE_ROBBER'; playerId: string; hexId: string }
   | { type: 'STEAL_FROM_PLAYER'; playerId: string; targetPlayerId: string }
   | { type: 'BUILD_ROAD'; playerId: string; edgeId: string }
@@ -55,18 +123,24 @@ export type GameAction =
         monopolyResource?: ResourceType;
       };
     }
-  | { type: 'MARITIME_TRADE'; playerId: string; giving: ResourceType; asking: ResourceType; ratio: number }
+  | {
+      type: 'MARITIME_TRADE';
+      playerId: string;
+      giving: TradeableCardType;
+      asking: TradeableCardType;
+      ratio: number;
+    }
   | {
       type: 'MARITIME_BATCH_TRADE';
       playerId: string;
-      giving: Partial<ResourceCount>;
-      asking: Partial<ResourceCount>;
+      giving: TradePayload;
+      asking: TradePayload;
     }
   | {
       type: 'PROPOSE_TRADE';
       playerId: string;
-      giving: Partial<ResourceCount>;
-      asking: Partial<ResourceCount>;
+      giving: TradePayload;
+      asking: TradePayload;
       targetPlayerId?: string;
     }
   | { type: 'RESPOND_TRADE'; playerId: string; tradeId: string; accept: boolean }
@@ -74,12 +148,42 @@ export type GameAction =
       type: 'COUNTER_TRADE';
       playerId: string;
       tradeId: string;
-      giving: Partial<ResourceCount>;
-      asking: Partial<ResourceCount>;
+      giving: TradePayload;
+      asking: TradePayload;
     }
   | { type: 'ACCEPT_COUNTER_TRADE'; playerId: string; tradeId: string; counterId: string }
   | { type: 'CANCEL_TRADE'; playerId: string; tradeId: string }
-  | { type: 'END_TURN'; playerId: string };
+  | { type: 'END_TURN'; playerId: string }
+  // Cities & Knights Actions
+  | { type: 'BUILD_CITY_WALL'; playerId: string; vertexId: string }
+  | {
+      type: 'UPGRADE_CITY_IMPROVEMENT';
+      playerId: string;
+      discipline: ProgressCardDiscipline;
+      cityVertexId?: string;
+    }
+  | { type: 'RECRUIT_KNIGHT'; playerId: string; vertexId: string }
+  | { type: 'ACTIVATE_KNIGHT'; playerId: string; vertexId: string }
+  | { type: 'PROMOTE_KNIGHT'; playerId: string; vertexId: string }
+  | { type: 'MOVE_KNIGHT'; playerId: string; fromVertexId: string; toVertexId: string }
+  | { type: 'MOVE_DISPLACED_KNIGHT'; playerId: string; toVertexId: string }
+  | { type: 'CHASE_ROBBER'; playerId: string; knightVertexId: string; hexId: string }
+  | {
+      type: 'PLAY_PROGRESS_CARD';
+      playerId: string;
+      cardId: string;
+      options?: PlayProgressCardOptions;
+    }
+  | { type: 'DISCARD_PROGRESS_CARD'; playerId: string; cardId: string }
+  | { type: 'CHOOSE_AQUEDUCT_RESOURCE'; playerId: string; resource: ResourceType }
+  | { type: 'CHOOSE_BARBARIAN_REWARD'; playerId: string; discipline: ProgressCardDiscipline }
+  | { type: 'CHOOSE_PILLAGED_CITY'; playerId: string; vertexId: string }
+  | { type: 'RESOLVE_GUILD_DUES'; playerId: string; cards: TradeableCardType[] }
+  | { type: 'RESOLVE_ESPIONAGE'; playerId: string; cardId: string }
+  | { type: 'GIVE_WEDDING_CARDS'; playerId: string; cards: TradePayload }
+  | { type: 'RESPOND_COMMERCIAL_HARBOR'; playerId: string; commodity: CommodityType }
+  | { type: 'CHOOSE_DESERTER_KNIGHT'; playerId: string; vertexId: string }
+  | { type: 'PLACE_DESERTER_KNIGHT'; playerId: string; vertexId: string; level?: 1 | 2 | 3 };
 
 export interface ActionResult {
   success: boolean;
@@ -91,13 +195,20 @@ function validateDomesticTradePayloads(
   giving: unknown,
   asking: unknown,
   freeTradesEnabled: boolean,
-): { valid: true; cleanGiving: Partial<ResourceCount>; cleanAsking: Partial<ResourceCount> } | { valid: false; error: string } {
-  if (!isValidResourcePayload(giving) || !isValidResourcePayload(asking)) {
-    return { valid: false, error: 'Invalid resource quantities: must be non-negative integers for valid resources.' };
+  allowCommodities = false,
+):
+  | { valid: true; cleanGiving: TradePayload; cleanAsking: TradePayload }
+  | { valid: false; error: string } {
+  if (!isValidTradePayload(giving, allowCommodities) || !isValidTradePayload(asking, allowCommodities)) {
+    return {
+      success: false,
+      valid: false,
+      error: 'Invalid resource quantities: must be non-negative integers for valid resources.',
+    } as any;
   }
 
-  const totalGiving = sumResources(giving);
-  const totalAsking = sumResources(asking);
+  const totalGiving = sumTradePayload(giving, allowCommodities);
+  const totalAsking = sumTradePayload(asking, allowCommodities);
 
   if (totalGiving <= 0 && totalAsking <= 0) {
     return { valid: false, error: 'Entirely empty trades are not allowed.' };
@@ -106,11 +217,13 @@ function validateDomesticTradePayloads(
   if (!freeTradesEnabled && (totalGiving <= 0 || totalAsking <= 0)) {
     return {
       valid: false,
-      error: 'Free trades are disabled! Both sides must give at least 1 resource card.',
+      error: 'Free trades are disabled! Both sides must give at least 1 card.',
     };
   }
 
-  for (const res of VALID_RESOURCES) {
+  const validKeys = allowCommodities ? VALID_TRADEABLES : VALID_RESOURCES;
+
+  for (const res of validKeys) {
     if ((giving[res] || 0) > 0 && (asking[res] || 0) > 0) {
       return {
         valid: false,
@@ -119,9 +232,9 @@ function validateDomesticTradePayloads(
     }
   }
 
-  const cleanGiving: Partial<ResourceCount> = {};
-  const cleanAsking: Partial<ResourceCount> = {};
-  for (const res of VALID_RESOURCES) {
+  const cleanGiving: TradePayload = {};
+  const cleanAsking: TradePayload = {};
+  for (const res of validKeys) {
     if ((giving[res] || 0) > 0) cleanGiving[res] = giving[res];
     if ((asking[res] || 0) > 0) cleanAsking[res] = asking[res];
   }
@@ -174,6 +287,143 @@ function evaluateAndNotifyLongestRoute(state: GameState) {
   }
 }
 
+function returnKnightLevelToSupply(player: any, level: 1 | 2 | 3) {
+  if (level === 1) player.basicKnightsLeft = Math.min(2, (player.basicKnightsLeft ?? 0) + 1);
+  else if (level === 2) player.strongKnightsLeft = Math.min(2, (player.strongKnightsLeft ?? 0) + 1);
+  else if (level === 3) player.mightyKnightsLeft = Math.min(2, (player.mightyKnightsLeft ?? 0) + 1);
+}
+
+function deductKnightLevelFromSupply(player: any, level: 1 | 2 | 3): boolean {
+  if (level === 1) {
+    if ((player.basicKnightsLeft ?? 0) <= 0) return false;
+    player.basicKnightsLeft--;
+    return true;
+  }
+  if (level === 2) {
+    if ((player.strongKnightsLeft ?? 0) <= 0) return false;
+    player.strongKnightsLeft--;
+    return true;
+  }
+  if ((player.mightyKnightsLeft ?? 0) <= 0) return false;
+  player.mightyKnightsLeft--;
+  return true;
+}
+
+function handleDisplacedOpponentKnight(
+  state: GameState,
+  displacedKnight: NonNullable<BoardState['knights']>[string],
+  displacerName: string,
+) {
+  const victim = state.players[displacedKnight.playerId];
+  const { emptyVertices } = getReachableKnightVertices(
+    state.board,
+    displacedKnight.playerId,
+    displacedKnight.vertexId,
+    displacedKnight.level,
+  );
+
+  if (emptyVertices.length === 0) {
+    if (victim) {
+      returnKnightLevelToSupply(victim, displacedKnight.level);
+    }
+    state.actionLog.push({
+      id: `log_${Date.now()}_${Math.random()}`,
+      timestamp: Date.now(),
+      playerId: displacedKnight.playerId,
+      message: `⚔️ ${displacerName} displaced ${victim?.name || 'opponent'}'s Level ${displacedKnight.level} Knight! With no connected empty vertex, it was removed from the board.`,
+      category: 'build',
+    });
+  } else if (emptyVertices.length === 1) {
+    const destV = emptyVertices[0];
+    if (!state.board.knights) state.board.knights = {};
+    state.board.knights[destV] = {
+      ...displacedKnight,
+      vertexId: destV,
+    };
+    state.actionLog.push({
+      id: `log_${Date.now()}_${Math.random()}`,
+      timestamp: Date.now(),
+      playerId: displacedKnight.playerId,
+      message: `⚔️ ${displacerName} displaced ${victim?.name || 'opponent'}'s Level ${displacedKnight.level} Knight to an adjacent road vertex.`,
+      category: 'build',
+    });
+  } else {
+    pauseNormalTurnTimer(state);
+    state.pendingDisplacedKnight = {
+      playerId: displacedKnight.playerId,
+      knightId: displacedKnight.id,
+      fromVertexId: displacedKnight.vertexId,
+      level: displacedKnight.level,
+      active: displacedKnight.active,
+      recruitedTurn: displacedKnight.recruitedTurn,
+      activatedTurn: displacedKnight.activatedTurn,
+      promotedTurn: displacedKnight.promotedTurn,
+      actionTakenTurn: displacedKnight.actionTakenTurn,
+      validVertexIds: emptyVertices,
+    };
+    refreshTurnTimer(state);
+    state.actionLog.push({
+      id: `log_${Date.now()}_${Math.random()}`,
+      timestamp: Date.now(),
+      playerId: displacedKnight.playerId,
+      message: `⚔️ ${displacerName} displaced ${victim?.name || 'opponent'}'s Level ${displacedKnight.level} Knight! ${victim?.name || 'Opponent'} must choose where to relocate it.`,
+      category: 'build',
+    });
+  }
+}
+
+function hasAnyPendingCKPrompts(state: GameState): boolean {
+  return (
+    Boolean(state.pendingDisplacedKnight) ||
+    Boolean(state.pendingDeserter) ||
+    Boolean(state.pendingGuildDues) ||
+    Boolean(state.pendingEspionage) ||
+    (state.pendingWeddingPlayerIds?.length || 0) > 0 ||
+    (state.pendingCommercialHarbor?.length || 0) > 0 ||
+    (state.pendingAqueductPlayerIds?.length || 0) > 0 ||
+    (state.pendingBarbarianRewardPlayerIds?.length || 0) > 0 ||
+    (state.pendingBarbarianPillagePlayerIds?.length || 0) > 0
+  );
+}
+
+function resumeTimerIfCKPromptsCleared(state: GameState) {
+  if (!hasAnyPendingCKPrompts(state) && state.freeRoadsRemaining === 0) {
+    resumeNormalTurnTimer(state);
+  }
+}
+
+function getBankSupply(state: GameState, type: TradeableCardType): number {
+  if (isValidResourceType(type)) {
+    return state.resourceBank[type] || 0;
+  }
+  return state.commodityBank?.[type] || 0;
+}
+
+function adjustBankSupply(state: GameState, type: TradeableCardType, delta: number) {
+  if (isValidResourceType(type)) {
+    state.resourceBank[type] = Math.max(0, (state.resourceBank[type] || 0) + delta);
+  } else if (isValidCommodityType(type)) {
+    if (!state.commodityBank) state.commodityBank = { cloth: 0, coin: 0, paper: 0 };
+    state.commodityBank[type] = Math.max(0, (state.commodityBank[type] || 0) + delta);
+  }
+}
+
+function getPlayerCardSupply(player: any, type: TradeableCardType): number {
+  if (isValidResourceType(type)) {
+    return player.resources[type] || 0;
+  }
+  return player.commodities?.[type] || 0;
+}
+
+function adjustPlayerCardSupply(player: any, type: TradeableCardType, delta: number) {
+  if (isValidResourceType(type)) {
+    player.resources[type] = Math.max(0, (player.resources[type] || 0) + delta);
+  } else if (isValidCommodityType(type)) {
+    if (!player.commodities) player.commodities = { cloth: 0, coin: 0, paper: 0 };
+    player.commodities[type] = Math.max(0, (player.commodities[type] || 0) + delta);
+  }
+}
+
 export function applyAction(
   state: GameState,
   action: GameAction,
@@ -197,6 +447,20 @@ export function applyAction(
   if (!player) {
     return { success: false, error: 'Player does not exist.' };
   }
+  if (!player.commodities) {
+    player.commodities = { cloth: 0, coin: 0, paper: 0 };
+  }
+  if (!player.progressCards) {
+    player.progressCards = [];
+  }
+  if (!player.playedProgressCards) {
+    player.playedProgressCards = [];
+  }
+  if (!player.cityImprovements) {
+    player.cityImprovements = { trade: 0, politics: 0, science: 0 };
+  }
+
+  const isCK = state.settings.expansion === 'cities_and_knights';
 
   switch (action.type) {
     case 'BUILD_SETUP_SETTLEMENT': {
@@ -208,22 +472,34 @@ export function applyAction(
         return { success: false, error: 'Not your turn in setup.' };
       }
       if (state.lastSetupVertexId !== null) {
-        return { success: false, error: 'You already placed your settlement. Now place a road attached to it!' };
+        return {
+          success: false,
+          error: 'You already placed your building. Now place a road attached to it!',
+        };
       }
       if (typeof action.vertexId !== 'string' || !state.board.vertices[action.vertexId]) {
         return { success: false, error: 'Invalid vertex.' };
       }
       if (!satisfiesDistanceRule(action.vertexId, state.board)) {
-        return { success: false, error: 'Violates Distance Rule: must be at least 2 edges away from any settlement.' };
+        return {
+          success: false,
+          error: 'Violates Distance Rule: must be at least 2 edges away from any building.',
+        };
       }
+
+      const placeCity = isCK && state.phase === 'SETUP_ROUND_2';
 
       state.board.buildings[action.vertexId] = {
         id: `b_${action.vertexId}`,
-        type: 'settlement',
+        type: placeCity ? 'city' : 'settlement',
         playerId: action.playerId,
         vertexId: action.vertexId,
       };
-      player.settlementsLeft--;
+      if (placeCity) {
+        player.citiesLeft--;
+      } else {
+        player.settlementsLeft--;
+      }
       state.lastSetupVertexId = action.vertexId;
 
       if (state.phase === 'SETUP_ROUND_2') {
@@ -239,14 +515,15 @@ export function applyAction(
             }
           }
         }
+        const label = placeCity ? 'starting City' : '2nd settlement';
         state.actionLog.push({
           id: `log_${Date.now()}_${Math.random()}`,
           timestamp: Date.now(),
           playerId: player.id,
           message:
             received.length > 0
-              ? `${player.name} placed 2nd settlement and received starting resources (${received.join(', ')}).`
-              : `${player.name} placed 2nd settlement.`,
+              ? `${player.name} placed ${label} and received starting resources (${received.join(', ')}).`
+              : `${player.name} placed ${label}.`,
           category: 'build',
         });
       } else {
@@ -259,6 +536,7 @@ export function applyAction(
         });
       }
 
+      evaluateAndNotifyHarborMaster(state);
       refreshTurnTimer(state);
       syncPlayerVPs(state);
       return { success: true };
@@ -273,7 +551,7 @@ export function applyAction(
         return { success: false, error: 'Not your turn in setup.' };
       }
       if (!state.lastSetupVertexId) {
-        return { success: false, error: 'Place your starting settlement first!' };
+        return { success: false, error: 'Place your starting building first!' };
       }
       if (typeof action.edgeId !== 'string') {
         return { success: false, error: 'Invalid edge.' };
@@ -285,14 +563,13 @@ export function applyAction(
         return { success: false, error: 'Road already exists here.' };
       }
 
-      // In setup, road MUST connect directly to the settlement just placed (state.lastSetupVertexId)
       const connectsToLastSettlement =
         edge.v1 === state.lastSetupVertexId || edge.v2 === state.lastSetupVertexId;
 
       if (!connectsToLastSettlement) {
         return {
           success: false,
-          error: 'Starting road must connect directly to the settlement you just placed!',
+          error: 'Starting road must connect directly to the building you just placed!',
         };
       }
 
@@ -357,12 +634,37 @@ export function applyAction(
         return { success: false, error: 'Dice already rolled this turn.' };
       }
 
-      const [d1, d2] = state.settings?.houseRules?.balancedDice
-        ? drawBalancedDiceRoll(state)
-        : rollOrdinaryDice();
+      const orderedIds = getOrderedPlayerIds(state);
+      const isNoEarly7sWindow =
+        Boolean(state.settings?.houseRules?.noEarly7s) &&
+        !state.pendingAlchemyRoll &&
+        state.turnNumber <= orderedIds.length * 2;
+
+      let d1: number;
+      let d2: number;
+      if (state.pendingAlchemyRoll) {
+        [d1, d2] = state.pendingAlchemyRoll;
+        state.pendingAlchemyRoll = null;
+      } else if (state.settings?.houseRules?.balancedDice) {
+        [d1, d2] = drawBalancedDiceRoll(state);
+        let guard = 0;
+        while (isNoEarly7sWindow && d1 + d2 === 7 && guard < 20) {
+          [d1, d2] = drawBalancedDiceRoll(state);
+          guard++;
+        }
+        if (isNoEarly7sWindow && d1 + d2 === 7) {
+          [d1, d2] = [3, 3];
+        }
+      } else {
+        [d1, d2] = rollOrdinaryDice();
+        while (isNoEarly7sWindow && d1 + d2 === 7) {
+          [d1, d2] = rollOrdinaryDice();
+        }
+      }
 
       const sum = d1 + d2;
       state.diceRoll = [d1, d2];
+      state.redDie = d2;
       if (!state.diceHistory) {
         state.diceHistory = { 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 0, 9: 0, 10: 0, 11: 0, 12: 0 };
       }
@@ -370,38 +672,84 @@ export function applyAction(
       state.lastDiceRollAt = Date.now();
       state.diceRolledThisTurn = true;
 
-      state.actionLog.push({
-        id: `log_${Date.now()}_${Math.random()}`,
-        timestamp: Date.now(),
-        playerId: player.id,
-        message: `${player.name} rolled ${sum} (${d1} + ${d2}).`,
-        category: 'dice',
-      });
+      if (isCK) {
+        const eventFace = rollEventDie();
+        state.eventDie = eventFace;
+        const eventLabel =
+          eventFace === 'barbarian'
+            ? '⛵ Barbarian Ship'
+            : `🏛️ ${eventFace.charAt(0).toUpperCase() + eventFace.slice(1)} Gate`;
 
+        state.actionLog.push({
+          id: `log_${Date.now()}_${Math.random()}`,
+          timestamp: Date.now(),
+          playerId: player.id,
+          message: `${player.name} rolled ${sum} (White ${d1} + Red ${d2}) • Event: ${eventLabel}.`,
+          category: 'dice',
+        });
+
+        // Step 1 in Cities & Knights: Resolve Event Die first
+        resolveEventDie(state, eventFace, d2, orderedIds);
+        evaluateAndNotifyHarborMaster(state);
+      } else {
+        state.actionLog.push({
+          id: `log_${Date.now()}_${Math.random()}`,
+          timestamp: Date.now(),
+          playerId: player.id,
+          message: `${player.name} rolled ${sum} (${d1} + ${d2}).`,
+          category: 'dice',
+        });
+      }
+
+      // Step 2: Resolve Production or 7
       if (sum === 7) {
+        state.savedActionRemainingMs = null;
         state.robberControllerPlayerId = action.playerId;
         const discards: Record<string, number> = {};
         for (const p of Object.values(state.players)) {
-          const totalCards = Object.values(p.resources).reduce((s, n) => s + n, 0);
-          if (totalCards > state.settings.cardDiscardLimit) {
+          const totalCards =
+            Object.values(p.resources).reduce((s, n) => s + n, 0) + sumCommodities(p.commodities);
+          const playerLimit = getPlayerDiscardLimit(state, p.id);
+          if (totalCards > playerLimit) {
             discards[p.id] = Math.floor(totalCards / 2);
           }
         }
 
         if (Object.keys(discards).length > 0) {
           state.phase = 'DISCARD_PHASE';
+          state.postDiscardPhase = null;
           state.pendingDiscards = discards;
           state.actionLog.push({
             id: `log_${Date.now()}_${Math.random()}`,
             timestamp: Date.now(),
-            message: `A 7 was rolled! Players with >7 cards must discard half.`,
+            message: `A 7 was rolled! Players over their hand limit must discard half.`,
+            category: 'robber',
+          });
+        } else if (isCK && !state.robberActive) {
+          state.robberControllerPlayerId = null;
+          state.phase = 'ACTION_PHASE';
+          if (hasAnyPendingCKPrompts(state)) {
+            state.savedActionRemainingMs = getNormalTurnDurationMs(state);
+          }
+          state.actionLog.push({
+            id: `log_${Date.now()}_${Math.random()}`,
+            timestamp: Date.now(),
+            message: `A 7 was rolled, but the Robber remains inactive until after the first Barbarian Attack.`,
             category: 'robber',
           });
         } else {
           state.phase = 'ROBBER_PLACEMENT';
         }
+      } else if (isCK) {
+        state.savedActionRemainingMs = null;
+        resolveCKProduction(state, sum, orderedIds);
+        state.phase = 'ACTION_PHASE';
+        if (hasAnyPendingCKPrompts(state)) {
+          state.savedActionRemainingMs = getNormalTurnDurationMs(state);
+        }
       } else {
-        // Check resource distribution (official shortage rule: if bank lacks enough for all players owed that resource, no one gets it unless only 1 player is owed)
+        state.savedActionRemainingMs = null;
+        // Base Game production
         const owedByResource: Record<ResourceType, Record<string, number>> = {
           wood: {},
           brick: {},
@@ -410,8 +758,12 @@ export function applyAction(
           ore: {},
         };
 
+        const isCombined2And12 = Boolean(state.settings?.houseRules?.combined2And12);
+        const matchesRoll = (hexNum?: number) =>
+          hexNum === sum || (isCombined2And12 && (sum === 2 || sum === 12) && (hexNum === 2 || hexNum === 12));
+
         for (const hex of Object.values(state.board.hexes)) {
-          if (hex.number === sum && !hex.hasRobber && hex.resource) {
+          if (matchesRoll(hex.number) && !hex.hasRobber && hex.resource) {
             for (const vertex of Object.values(state.board.vertices)) {
               if (vertex.hexCoords.includes(hex.id)) {
                 const b = state.board.buildings[vertex.id];
@@ -481,6 +833,7 @@ export function applyAction(
         state.phase = 'ACTION_PHASE';
       }
 
+      evaluateAndNotifyHarborMaster(state);
       refreshTurnTimer(state);
       syncPlayerVPs(state);
       return { success: true };
@@ -495,24 +848,51 @@ export function applyAction(
         return { success: false, error: 'You do not need to discard.' };
       }
 
-      if (!isValidResourcePayload(action.resources)) {
+      // Support combined TradePayload in action.resources and/or optional action.commodities
+      if (!isValidTradePayload(action.resources, isCK)) {
         return {
           success: false,
           error: 'Invalid resource quantities: must be non-negative integers.',
         };
       }
+      if (action.commodities !== undefined && !isValidTradePayload(action.commodities, true)) {
+        return {
+          success: false,
+          error: 'Invalid commodity quantities: must be non-negative integers.',
+        };
+      }
 
-      const totalDiscarded = sumResources(action.resources);
+      const combinedDiscard: TradePayload = { ...action.resources };
+      if (action.commodities) {
+        for (const c of VALID_COMMODITIES) {
+          if ((action.commodities[c] || 0) > 0) {
+            combinedDiscard[c] = (combinedDiscard[c] || 0) + (action.commodities[c] || 0);
+          }
+        }
+      }
+
+      const totalDiscarded = sumTradePayload(combinedDiscard, isCK);
       if (totalDiscarded !== needed) {
         return { success: false, error: `You must discard exactly ${needed} cards.` };
       }
 
-      if (!canAfford(player.resources, action.resources)) {
+      if (!canAffordTradePayload(player.resources, player.commodities, combinedDiscard, isCK)) {
         return { success: false, error: 'You do not hold these cards.' };
       }
 
-      player.resources = deductCost(player.resources, action.resources);
-      state.resourceBank = addResources(state.resourceBank, action.resources);
+      deductTradePayloadFromPlayer(player, combinedDiscard);
+      for (const r of VALID_RESOURCES) {
+        const amt = combinedDiscard[r] || 0;
+        if (amt > 0) state.resourceBank[r] = (state.resourceBank[r] || 0) + amt;
+      }
+      if (isCK) {
+        if (!state.commodityBank) state.commodityBank = { cloth: 0, coin: 0, paper: 0 };
+        for (const c of VALID_COMMODITIES) {
+          const amt = combinedDiscard[c] || 0;
+          if (amt > 0) state.commodityBank[c] = (state.commodityBank[c] || 0) + amt;
+        }
+      }
+
       delete state.pendingDiscards[action.playerId];
 
       state.actionLog.push({
@@ -524,9 +904,28 @@ export function applyAction(
       });
 
       if (Object.keys(state.pendingDiscards).length === 0) {
-        state.phase = 'ROBBER_PLACEMENT';
-        state.robberControllerPlayerId = state.currentTurnPlayerId;
-        refreshTurnTimer(state);
+        if (state.postDiscardPhase) {
+          state.phase = state.postDiscardPhase;
+          state.postDiscardPhase = null;
+          resumeNormalTurnTimer(state);
+        } else if (isCK && !state.robberActive) {
+          state.phase = 'ACTION_PHASE';
+          state.robberControllerPlayerId = null;
+          if (hasAnyPendingCKPrompts(state)) {
+            state.savedActionRemainingMs = getNormalTurnDurationMs(state);
+          }
+          refreshTurnTimer(state);
+          state.actionLog.push({
+            id: `log_${Date.now()}_${Math.random()}`,
+            timestamp: Date.now(),
+            message: `Discards complete! The Robber remains inactive until after the first Barbarian Attack.`,
+            category: 'robber',
+          });
+        } else {
+          state.phase = 'ROBBER_PLACEMENT';
+          state.robberControllerPlayerId = state.currentTurnPlayerId;
+          refreshTurnTimer(state);
+        }
       }
 
       syncPlayerVPs(state);
@@ -548,14 +947,21 @@ export function applyAction(
         return { success: false, error: 'Robber must be moved to a different hex.' };
       }
       const targetHex = state.board.hexes[action.hexId];
-      if (!targetHex) {
-        return { success: false, error: 'Invalid hex.' };
+      if (!targetHex || targetHex.terrain === 'sea') {
+        return { success: false, error: 'Invalid land hex.' };
+      }
+      if (!isValidRobberHex(state, action.hexId, action.playerId)) {
+        return {
+          success: false,
+          error: 'Friendly Robber is active: cannot place the Robber on a hex adjacent to a player at starting Victory Points!',
+        };
       }
 
       const oldHex = state.board.hexes[state.board.robberHexId];
       if (oldHex) oldHex.hasRobber = false;
       targetHex.hasRobber = true;
       state.board.robberHexId = action.hexId;
+      state.robberActive = true;
 
       const stealTargets = new Set<string>();
       for (const vertex of Object.values(state.board.vertices)) {
@@ -563,7 +969,11 @@ export function applyAction(
           const b = state.board.buildings[vertex.id];
           if (b && b.playerId !== action.playerId) {
             const targetP = state.players[b.playerId];
-            if (targetP && Object.values(targetP.resources).some((n) => n > 0)) {
+            if (
+              targetP &&
+              (Object.values(targetP.resources).some((n) => n > 0) ||
+                sumCommodities(targetP.commodities) > 0)
+            ) {
               stealTargets.add(b.playerId);
             }
           }
@@ -580,12 +990,26 @@ export function applyAction(
       if (targetsArray.length === 0) {
         state.phase = nextPhaseAfterRobber;
         state.robberControllerPlayerId = null;
+        if (
+          (state.phase === 'ACTION_PHASE' || state.phase === 'PAIRED_ACTION_PHASE') &&
+          hasAnyPendingCKPrompts(state) &&
+          !state.savedActionRemainingMs
+        ) {
+          state.savedActionRemainingMs = getNormalTurnDurationMs(state);
+        }
         resumeNormalTurnTimer(state);
       } else if (targetsArray.length === 1) {
         const targetId = targetsArray[0];
         stealRandomCard(player, state.players[targetId], state);
         state.phase = nextPhaseAfterRobber;
         state.robberControllerPlayerId = null;
+        if (
+          (state.phase === 'ACTION_PHASE' || state.phase === 'PAIRED_ACTION_PHASE') &&
+          hasAnyPendingCKPrompts(state) &&
+          !state.savedActionRemainingMs
+        ) {
+          state.savedActionRemainingMs = getNormalTurnDurationMs(state);
+        }
         resumeNormalTurnTimer(state);
       } else {
         state.phase = 'ROBBER_STEAL';
@@ -630,6 +1054,13 @@ export function applyAction(
           ? 'PAIRED_ACTION_PHASE'
           : 'ACTION_PHASE';
 
+      if (
+        (state.phase === 'ACTION_PHASE' || state.phase === 'PAIRED_ACTION_PHASE') &&
+        hasAnyPendingCKPrompts(state) &&
+        !state.savedActionRemainingMs
+      ) {
+        state.savedActionRemainingMs = getNormalTurnDurationMs(state);
+      }
       resumeNormalTurnTimer(state);
       syncPlayerVPs(state);
       return { success: true };
@@ -710,7 +1141,7 @@ export function applyAction(
         return { success: false, error: 'Invalid vertex.' };
       }
       if (!satisfiesDistanceRule(action.vertexId, state.board)) {
-        return { success: false, error: 'Violates Distance Rule: too close to another building.' };
+        return { success: false, error: 'Violates Distance Rule: too close to another building or occupied by a knight.' };
       }
       if (!isValidSettlementVertex(state, action.playerId, action.vertexId)) {
         return { success: false, error: 'Settlement must connect to one of your roads.' };
@@ -735,6 +1166,7 @@ export function applyAction(
       });
 
       evaluateAndNotifyLongestRoute(state);
+      evaluateAndNotifyHarborMaster(state);
       syncPlayerVPs(state);
       return { success: true };
     }
@@ -749,8 +1181,16 @@ export function applyAction(
       if (player.citiesLeft <= 0) {
         return { success: false, error: 'No cities remaining in supply.' };
       }
-      if (!canAfford(player.resources, BUILDING_COSTS.city)) {
-        return { success: false, error: 'Cannot afford city (2 Wheat + 3 Ore required).' };
+      const hasMedicineDiscount = isCK && (state.medicineDiscountsRemaining || 0) > 0;
+      const cityCost = hasMedicineDiscount ? BUILDING_COSTS.cityMedicine : BUILDING_COSTS.city;
+
+      if (!canAfford(player.resources, cityCost)) {
+        return {
+          success: false,
+          error: hasMedicineDiscount
+            ? 'Cannot afford City with Medicine (1 Wheat + 2 Ore required).'
+            : 'Cannot afford City (2 Wheat + 3 Ore required).',
+        };
       }
       if (typeof action.vertexId !== 'string' || !state.board.vertices[action.vertexId]) {
         return { success: false, error: 'Invalid vertex.' };
@@ -761,17 +1201,62 @@ export function applyAction(
         return { success: false, error: 'Must upgrade an existing settlement of your own.' };
       }
 
-      player.resources = deductCost(player.resources, BUILDING_COSTS.city);
-      state.resourceBank = addResources(state.resourceBank, BUILDING_COSTS.city);
+      player.resources = deductCost(player.resources, cityCost);
+      state.resourceBank = addResources(state.resourceBank, cityCost);
+      if (hasMedicineDiscount) {
+        state.medicineDiscountsRemaining = Math.max(0, (state.medicineDiscountsRemaining || 0) - 1);
+      }
       existingBuilding.type = 'city';
       player.citiesLeft--;
-      player.settlementsLeft++;
+      player.settlementsLeft = Math.min(5, player.settlementsLeft + 1);
 
       state.actionLog.push({
         id: `log_${Date.now()}_${Math.random()}`,
         timestamp: Date.now(),
         playerId: player.id,
-        message: `${player.name} upgraded a settlement to a City!`,
+        message: `${player.name} upgraded a settlement to a City${hasMedicineDiscount ? ' (using Medicine)' : ''}!`,
+        category: 'build',
+      });
+
+      evaluateAndNotifyHarborMaster(state);
+      syncPlayerVPs(state);
+      return { success: true };
+    }
+
+    case 'BUILD_CITY_WALL': {
+      if (!isCK) {
+        return { success: false, error: 'City Walls are only available in Cities & Knights.' };
+      }
+      const isPlayer1Action = state.phase === 'ACTION_PHASE' && action.playerId === state.currentTurnPlayerId;
+      const isPlayer2Action = state.phase === 'PAIRED_ACTION_PHASE' && action.playerId === state.pairedPlayerId;
+      if (!isPlayer1Action && !isPlayer2Action) {
+        return { success: false, error: 'Not your action phase.' };
+      }
+
+      if ((player.cityWallsLeft ?? 0) <= 0) {
+        return { success: false, error: 'You have no City Walls remaining in your supply (max 3).' };
+      }
+      if (!canAfford(player.resources, BUILDING_COSTS.cityWall)) {
+        return { success: false, error: 'Cannot afford City Wall (2 Brick required).' };
+      }
+      const b = state.board.buildings[action.vertexId];
+      if (!b || b.playerId !== action.playerId || b.type !== 'city') {
+        return { success: false, error: 'City Wall must be built under one of your Cities.' };
+      }
+      if (b.hasWall) {
+        return { success: false, error: 'This City already has a City Wall.' };
+      }
+
+      player.resources = deductCost(player.resources, BUILDING_COSTS.cityWall);
+      state.resourceBank = addResources(state.resourceBank, BUILDING_COSTS.cityWall);
+      b.hasWall = true;
+      player.cityWallsLeft--;
+
+      state.actionLog.push({
+        id: `log_${Date.now()}_${Math.random()}`,
+        timestamp: Date.now(),
+        playerId: player.id,
+        message: `🧱 ${player.name} built a City Wall (hand limit on 7 increased to ${getPlayerDiscardLimit(state, player.id)}).`,
         category: 'build',
       });
 
@@ -779,7 +1264,1385 @@ export function applyAction(
       return { success: true };
     }
 
+    case 'UPGRADE_CITY_IMPROVEMENT': {
+      if (!isCK) {
+        return { success: false, error: 'City Improvements are only available in Cities & Knights.' };
+      }
+      const isPlayer1Action = state.phase === 'ACTION_PHASE' && action.playerId === state.currentTurnPlayerId;
+      const isPlayer2Action = state.phase === 'PAIRED_ACTION_PHASE' && action.playerId === state.pairedPlayerId;
+      if (!isPlayer1Action && !isPlayer2Action) {
+        return { success: false, error: 'Not your action phase.' };
+      }
+      if (!isValidDiscipline(action.discipline)) {
+        return { success: false, error: 'Invalid city improvement discipline.' };
+      }
+
+      const playerCities = Object.values(state.board.buildings).filter(
+        (b) => b.playerId === action.playerId && b.type === 'city',
+      );
+      if (playerCities.length === 0) {
+        return { success: false, error: 'You must own at least 1 City on the board to build City Improvements.' };
+      }
+
+      const currentLevel = player.cityImprovements[action.discipline] || 0;
+      if (currentLevel >= 5) {
+        return { success: false, error: `Your ${action.discipline} improvement is already at the maximum Level 5.` };
+      }
+
+      const targetLevel = currentLevel + 1;
+      const commodityType = DISCIPLINE_COMMODITY[action.discipline];
+      const hasCraneDiscount = (state.craneDiscountsRemaining || 0) > 0;
+      const commodityCost = Math.max(0, targetLevel - (hasCraneDiscount ? 1 : 0));
+
+      if ((player.commodities[commodityType] || 0) < commodityCost) {
+        return {
+          success: false,
+          error: `Need ${commodityCost} ${commodityType} to upgrade ${action.discipline} to Level ${targetLevel}.`,
+        };
+      }
+
+      // Check Metropolis rules if upgrading to Level 4 or 5:
+      // To claim a Metropolis at Level 4 (when unclaimed) or steal it at Level 5 (when current owner is at Level 4),
+      // the player must have at least 1 City on the board that does not already have a Metropolis.
+      if (!state.metropolises) {
+        state.metropolises = {
+          trade: { ownerId: null, vertexId: null, level: 0 },
+          politics: { ownerId: null, vertexId: null, level: 0 },
+          science: { ownerId: null, vertexId: null, level: 0 },
+        };
+      }
+      const metro = state.metropolises[action.discipline];
+      const nonMetroCities = playerCities.filter((b) => !b.metropolis);
+      const wouldClaimMetropolis =
+        targetLevel >= 4 &&
+        metro.ownerId !== player.id &&
+        (metro.ownerId === null || targetLevel > metro.level);
+
+      if (wouldClaimMetropolis && nonMetroCities.length === 0) {
+        return {
+          success: false,
+          error: 'You must own a City without a Metropolis to claim this Metropolis!',
+        };
+      }
+
+      // Deduct commodities
+      if (commodityCost > 0) {
+        player.commodities[commodityType] -= commodityCost;
+        if (!state.commodityBank) state.commodityBank = { cloth: 0, coin: 0, paper: 0 };
+        state.commodityBank[commodityType] += commodityCost;
+      }
+      if (hasCraneDiscount) {
+        state.craneDiscountsRemaining = Math.max(0, (state.craneDiscountsRemaining || 0) - 1);
+      }
+
+      player.cityImprovements[action.discipline] = targetLevel;
+      const buildingName = CITY_IMPROVEMENT_NAMES[action.discipline][targetLevel - 1];
+
+      state.actionLog.push({
+        id: `log_${Date.now()}_${Math.random()}`,
+        timestamp: Date.now(),
+        playerId: player.id,
+        message: `🏛️ ${player.name} upgraded ${action.discipline.toUpperCase()} to Level ${targetLevel} (${buildingName})${hasCraneDiscount ? ' using Crane' : ''}!`,
+        category: 'build',
+      });
+
+      if (wouldClaimMetropolis) {
+        // Remove Metropolis from previous owner's city if stolen
+        if (metro.vertexId && state.board.buildings[metro.vertexId]) {
+          delete state.board.buildings[metro.vertexId].metropolis;
+        }
+        const chosenCity =
+          (action.cityVertexId &&
+            nonMetroCities.find((c) => c.vertexId === action.cityVertexId)) ||
+          nonMetroCities[0];
+        chosenCity.metropolis = action.discipline;
+
+        const prevOwnerId = metro.ownerId;
+        metro.ownerId = player.id;
+        metro.vertexId = chosenCity.vertexId;
+        metro.level = targetLevel;
+
+        state.latestAwardEvent = {
+          id: `award_metro_${action.discipline}_${Date.now()}`,
+          timestamp: Date.now(),
+          awardType: 'metropolis',
+          playerId: player.id,
+          playerName: player.name,
+          playerColor: player.color,
+          metricValue: targetLevel,
+          subtitle: `${action.discipline.toUpperCase()} Metropolis (+2 VP)`,
+        };
+
+        state.actionLog.push({
+          id: `log_${Date.now()}_${Math.random()}`,
+          timestamp: Date.now(),
+          playerId: player.id,
+          message: prevOwnerId
+            ? `👑 ${player.name} reached Level 5 and took the ${action.discipline.toUpperCase()} Metropolis from ${state.players[prevOwnerId]?.name || 'opponent'} (+2 VP)!`
+            : `👑 ${player.name} claimed the ${action.discipline.toUpperCase()} Metropolis (+2 VP)!`,
+          category: 'build',
+        });
+      } else if (metro.ownerId === player.id) {
+        metro.level = targetLevel;
+      }
+
+      syncPlayerVPs(state);
+      return { success: true };
+    }
+
+    case 'RECRUIT_KNIGHT': {
+      if (!isCK) {
+        return { success: false, error: 'Knights on the board are only available in Cities & Knights.' };
+      }
+      const isPlayer1Action = state.phase === 'ACTION_PHASE' && action.playerId === state.currentTurnPlayerId;
+      const isPlayer2Action = state.phase === 'PAIRED_ACTION_PHASE' && action.playerId === state.pairedPlayerId;
+      if (!isPlayer1Action && !isPlayer2Action) {
+        return { success: false, error: 'Not your action phase.' };
+      }
+
+      if ((player.basicKnightsLeft ?? 0) <= 0) {
+        return { success: false, error: 'No Basic (Level 1) Knights remaining in your supply (max 2).' };
+      }
+      if (!canAfford(player.resources, BUILDING_COSTS.knight)) {
+        return { success: false, error: 'Cannot afford Basic Knight (1 Sheep + 1 Ore required).' };
+      }
+      if (!isValidKnightRecruitVertex(state, action.playerId, action.vertexId)) {
+        return {
+          success: false,
+          error: 'Knight must be placed on an empty vertex connected to one of your roads.',
+        };
+      }
+
+      player.resources = deductCost(player.resources, BUILDING_COSTS.knight);
+      state.resourceBank = addResources(state.resourceBank, BUILDING_COSTS.knight);
+      player.basicKnightsLeft--;
+
+      if (!state.board.knights) state.board.knights = {};
+      state.board.knights[action.vertexId] = {
+        id: `k_${action.playerId}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        playerId: action.playerId,
+        vertexId: action.vertexId,
+        level: 1,
+        active: false,
+        recruitedTurn: state.turnNumber,
+        activatedTurn: null,
+        promotedTurn: null,
+        actionTakenTurn: null,
+      };
+
+      state.actionLog.push({
+        id: `log_${Date.now()}_${Math.random()}`,
+        timestamp: Date.now(),
+        playerId: player.id,
+        message: `🛡️ ${player.name} recruited a Basic Knight (Level 1, inactive).`,
+        category: 'build',
+      });
+
+      evaluateAndNotifyLongestRoute(state);
+      syncPlayerVPs(state);
+      return { success: true };
+    }
+
+    case 'ACTIVATE_KNIGHT': {
+      if (!isCK) {
+        return { success: false, error: 'Knights are only available in Cities & Knights.' };
+      }
+      const isPlayer1Action = state.phase === 'ACTION_PHASE' && action.playerId === state.currentTurnPlayerId;
+      const isPlayer2Action = state.phase === 'PAIRED_ACTION_PHASE' && action.playerId === state.pairedPlayerId;
+      if (!isPlayer1Action && !isPlayer2Action) {
+        return { success: false, error: 'Not your action phase.' };
+      }
+
+      const knight = state.board.knights?.[action.vertexId];
+      if (!knight || knight.playerId !== action.playerId) {
+        return { success: false, error: 'You do not have a Knight at this vertex.' };
+      }
+      if (knight.active) {
+        return { success: false, error: 'This Knight is already active.' };
+      }
+      if (!canAfford(player.resources, BUILDING_COSTS.activateKnight)) {
+        return { success: false, error: 'Cannot afford to activate Knight (1 Wheat required).' };
+      }
+
+      player.resources = deductCost(player.resources, BUILDING_COSTS.activateKnight);
+      state.resourceBank = addResources(state.resourceBank, BUILDING_COSTS.activateKnight);
+      knight.active = true;
+      knight.activatedTurn = state.turnNumber;
+
+      state.actionLog.push({
+        id: `log_${Date.now()}_${Math.random()}`,
+        timestamp: Date.now(),
+        playerId: player.id,
+        message: `⚔️ ${player.name} activated their Level ${knight.level} Knight!`,
+        category: 'build',
+      });
+
+      syncPlayerVPs(state);
+      return { success: true };
+    }
+
+    case 'PROMOTE_KNIGHT': {
+      if (!isCK) {
+        return { success: false, error: 'Knights are only available in Cities & Knights.' };
+      }
+      const isPlayer1Action = state.phase === 'ACTION_PHASE' && action.playerId === state.currentTurnPlayerId;
+      const isPlayer2Action = state.phase === 'PAIRED_ACTION_PHASE' && action.playerId === state.pairedPlayerId;
+      if (!isPlayer1Action && !isPlayer2Action) {
+        return { success: false, error: 'Not your action phase.' };
+      }
+
+      const knight = state.board.knights?.[action.vertexId];
+      if (!knight || knight.playerId !== action.playerId) {
+        return { success: false, error: 'You do not have a Knight at this vertex.' };
+      }
+      if (knight.level >= 3) {
+        return { success: false, error: 'This Knight is already a Mighty Knight (Level 3).' };
+      }
+      if (knight.promotedTurn === state.turnNumber) {
+        return { success: false, error: 'A Knight may only be promoted once per turn.' };
+      }
+
+      const nextLevel = (knight.level + 1) as 2 | 3;
+      if (nextLevel === 3 && (player.cityImprovements?.politics || 0) < 3) {
+        return {
+          success: false,
+          error: 'You need Politics Level 3 (Fortress) to promote Knights to Mighty (Level 3).',
+        };
+      }
+      if (nextLevel === 2 && (player.strongKnightsLeft ?? 0) <= 0) {
+        return { success: false, error: 'No Strong (Level 2) Knights remaining in your supply (max 2).' };
+      }
+      if (nextLevel === 3 && (player.mightyKnightsLeft ?? 0) <= 0) {
+        return { success: false, error: 'No Mighty (Level 3) Knights remaining in your supply (max 2).' };
+      }
+
+      const isFreePromo = (state.freeKnightPromotionsRemaining || 0) > 0;
+      if (!isFreePromo && !canAfford(player.resources, BUILDING_COSTS.knight)) {
+        return { success: false, error: 'Cannot afford to promote Knight (1 Sheep + 1 Ore required).' };
+      }
+
+      if (isFreePromo) {
+        state.freeKnightPromotionsRemaining = Math.max(0, (state.freeKnightPromotionsRemaining || 0) - 1);
+      } else {
+        player.resources = deductCost(player.resources, BUILDING_COSTS.knight);
+        state.resourceBank = addResources(state.resourceBank, BUILDING_COSTS.knight);
+      }
+
+      returnKnightLevelToSupply(player, knight.level);
+      deductKnightLevelFromSupply(player, nextLevel);
+      knight.level = nextLevel;
+      knight.promotedTurn = state.turnNumber;
+
+      state.actionLog.push({
+        id: `log_${Date.now()}_${Math.random()}`,
+        timestamp: Date.now(),
+        playerId: player.id,
+        message: `🛡️ ${player.name} promoted their Knight to Level ${nextLevel}${isFreePromo ? ' (using Smith)' : ''}!`,
+        category: 'build',
+      });
+
+      syncPlayerVPs(state);
+      return { success: true };
+    }
+
+    case 'MOVE_KNIGHT': {
+      if (!isCK) {
+        return { success: false, error: 'Knights are only available in Cities & Knights.' };
+      }
+      const isPlayer1Action = state.phase === 'ACTION_PHASE' && action.playerId === state.currentTurnPlayerId;
+      const isPlayer2Action = state.phase === 'PAIRED_ACTION_PHASE' && action.playerId === state.pairedPlayerId;
+      if (!isPlayer1Action && !isPlayer2Action) {
+        return { success: false, error: 'Not your action phase.' };
+      }
+      if (state.pendingDisplacedKnight) {
+        return { success: false, error: 'Wait for the displaced Knight to be relocated first.' };
+      }
+
+      const knight = state.board.knights?.[action.fromVertexId];
+      if (!knight || knight.playerId !== action.playerId) {
+        return { success: false, error: 'You do not have a Knight at that starting vertex.' };
+      }
+      if (!knight.active) {
+        return { success: false, error: 'Knight must be active to move or displace.' };
+      }
+      if (knight.activatedTurn === state.turnNumber || knight.recruitedTurn === state.turnNumber) {
+        return {
+          success: false,
+          error: 'A Knight cannot take an action on the same turn it was activated or recruited.',
+        };
+      }
+      if (knight.actionTakenTurn === state.turnNumber) {
+        return { success: false, error: 'This Knight has already taken an action this turn.' };
+      }
+
+      const { emptyVertices, displaceableKnightVertices } = getReachableKnightVertices(
+        state.board,
+        action.playerId,
+        action.fromVertexId,
+        knight.level,
+      );
+
+      const isMovingToEmpty = emptyVertices.includes(action.toVertexId);
+      const isDisplacing = displaceableKnightVertices.includes(action.toVertexId);
+
+      if (!isMovingToEmpty && !isDisplacing) {
+        return {
+          success: false,
+          error: 'Destination vertex is not reachable along your roads (or has an equal/stronger Knight).',
+        };
+      }
+
+      if (!state.board.knights) state.board.knights = {};
+      delete state.board.knights[action.fromVertexId];
+
+      const displacedOpponentKnight = isDisplacing ? state.board.knights[action.toVertexId] : undefined;
+      if (displacedOpponentKnight) {
+        delete state.board.knights[action.toVertexId];
+      }
+
+      knight.vertexId = action.toVertexId;
+      knight.active = false;
+      knight.actionTakenTurn = state.turnNumber;
+      state.board.knights[action.toVertexId] = knight;
+
+      if (displacedOpponentKnight) {
+        handleDisplacedOpponentKnight(state, displacedOpponentKnight, player.name);
+      } else {
+        state.actionLog.push({
+          id: `log_${Date.now()}_${Math.random()}`,
+          timestamp: Date.now(),
+          playerId: player.id,
+          message: `🐎 ${player.name} moved their Level ${knight.level} Knight.`,
+          category: 'build',
+        });
+      }
+
+      evaluateAndNotifyLongestRoute(state);
+      syncPlayerVPs(state);
+      return { success: true };
+    }
+
+    case 'MOVE_DISPLACED_KNIGHT': {
+      if (!state.pendingDisplacedKnight) {
+        return { success: false, error: 'No displaced Knight is waiting to be moved.' };
+      }
+      if (state.pendingDisplacedKnight.playerId !== action.playerId) {
+        return { success: false, error: 'It is not your displaced Knight to move.' };
+      }
+      if (!state.pendingDisplacedKnight.validVertexIds.includes(action.toVertexId)) {
+        return { success: false, error: 'Must choose a valid empty vertex connected to your roads.' };
+      }
+
+      const pending = state.pendingDisplacedKnight;
+      if (!state.board.knights) state.board.knights = {};
+      state.board.knights[action.toVertexId] = {
+        id: pending.knightId,
+        playerId: pending.playerId,
+        vertexId: action.toVertexId,
+        level: pending.level,
+        active: pending.active,
+        recruitedTurn: pending.recruitedTurn,
+        activatedTurn: pending.activatedTurn,
+        promotedTurn: pending.promotedTurn,
+        actionTakenTurn: pending.actionTakenTurn,
+      };
+      state.pendingDisplacedKnight = null;
+
+      state.actionLog.push({
+        id: `log_${Date.now()}_${Math.random()}`,
+        timestamp: Date.now(),
+        playerId: player.id,
+        message: `${player.name} relocated their displaced Level ${pending.level} Knight.`,
+        category: 'build',
+      });
+
+      resumeTimerIfCKPromptsCleared(state);
+      evaluateAndNotifyLongestRoute(state);
+      syncPlayerVPs(state);
+      return { success: true };
+    }
+
+    case 'CHASE_ROBBER': {
+      if (!isCK) {
+        return { success: false, error: 'Chase Away the Robber is only available in Cities & Knights.' };
+      }
+      const isPlayer1Action = state.phase === 'ACTION_PHASE' && action.playerId === state.currentTurnPlayerId;
+      const isPlayer2Action = state.phase === 'PAIRED_ACTION_PHASE' && action.playerId === state.pairedPlayerId;
+      if (!isPlayer1Action && !isPlayer2Action) {
+        return { success: false, error: 'Not your action phase.' };
+      }
+      if (!state.robberActive) {
+        return {
+          success: false,
+          error: 'The Robber cannot be moved until after the first Barbarian Attack!',
+        };
+      }
+
+      const knight = state.board.knights?.[action.knightVertexId];
+      if (!knight || knight.playerId !== action.playerId) {
+        return { success: false, error: 'You do not have a Knight at that vertex.' };
+      }
+      if (!knight.active) {
+        return { success: false, error: 'Knight must be active to chase away the Robber.' };
+      }
+      if (knight.activatedTurn === state.turnNumber || knight.recruitedTurn === state.turnNumber) {
+        return {
+          success: false,
+          error: 'A Knight cannot chase the Robber on the same turn it was activated or recruited.',
+        };
+      }
+      if (knight.actionTakenTurn === state.turnNumber) {
+        return { success: false, error: 'This Knight has already taken an action this turn.' };
+      }
+
+      const vertex = state.board.vertices[action.knightVertexId];
+      if (!vertex || !vertex.hexCoords.includes(state.board.robberHexId)) {
+        return { success: false, error: 'This Knight is not adjacent to the Robber hex.' };
+      }
+      if (
+        typeof action.hexId !== 'string' ||
+        action.hexId === state.board.robberHexId ||
+        !state.board.hexes[action.hexId] ||
+        state.board.hexes[action.hexId].terrain === 'sea'
+      ) {
+        return { success: false, error: 'Must select a different valid land hex for the Robber.' };
+      }
+      if (!isValidRobberHex(state, action.hexId, action.playerId)) {
+        return {
+          success: false,
+          error: 'Friendly Robber is active: cannot place the Robber on a hex adjacent to a player at starting Victory Points!',
+        };
+      }
+
+      knight.active = false;
+      knight.actionTakenTurn = state.turnNumber;
+
+      state.actionLog.push({
+        id: `log_${Date.now()}_${Math.random()}`,
+        timestamp: Date.now(),
+        playerId: player.id,
+        message: `⚔️ ${player.name}'s Level ${knight.level} Knight chased away the Robber!`,
+        category: 'robber',
+      });
+
+      // Transition through MOVE_ROBBER logic
+      pauseNormalTurnTimer(state);
+      state.phase = 'ROBBER_PLACEMENT';
+      state.robberControllerPlayerId = action.playerId;
+      return applyAction(state, { type: 'MOVE_ROBBER', playerId: action.playerId, hexId: action.hexId }, isSystemTimeout);
+    }
+
+    case 'PLAY_PROGRESS_CARD': {
+      if (!isCK) {
+        return { success: false, error: 'Progress Cards are only available in Cities & Knights.' };
+      }
+      const cardIdx = player.progressCards.findIndex((c) => c.id === action.cardId);
+      if (cardIdx === -1) {
+        return { success: false, error: 'You do not hold this Progress Card.' };
+      }
+      const card = player.progressCards[cardIdx];
+      const meta = PROGRESS_CARD_METADATA[card.type];
+      const opts = action.options || {};
+
+      // Alchemist is played during TURN_START before rolling dice
+      if (card.type === 'alchemy') {
+        if (state.phase !== 'TURN_START' || action.playerId !== state.currentTurnPlayerId || state.diceRolledThisTurn) {
+          return {
+            success: false,
+            error: 'Alchemist can only be played on your turn before rolling the dice!',
+          };
+        }
+        const dice = opts.alchemyDice;
+        if (
+          !Array.isArray(dice) ||
+          dice.length !== 2 ||
+          !Number.isInteger(dice[0]) ||
+          !Number.isInteger(dice[1]) ||
+          dice[0] < 1 ||
+          dice[0] > 6 ||
+          dice[1] < 1 ||
+          dice[1] > 6
+        ) {
+          return {
+            success: false,
+            error: 'Alchemist requires choosing valid White Die (1–6) and Red Die (1–6) numbers.',
+          };
+        }
+
+        player.progressCards.splice(cardIdx, 1);
+        player.playedProgressCards.push(card);
+        state.progressDecks?.[card.discipline].push(card);
+        state.pendingAlchemyRoll = [dice[0], dice[1]];
+
+        state.actionLog.push({
+          id: `log_${Date.now()}_${Math.random()}`,
+          timestamp: Date.now(),
+          playerId: player.id,
+          message: `🧪 ${player.name} played Alchemist and set the dice to White ${dice[0]} + Red ${dice[1]}!`,
+          category: 'card',
+        });
+
+        return applyAction(state, { type: 'ROLL_DICE', playerId: action.playerId }, isSystemTimeout);
+      }
+
+      // All other Progress Cards are played during the player's Action Phase
+      const isPlayer1Action = state.phase === 'ACTION_PHASE' && action.playerId === state.currentTurnPlayerId;
+      const isPlayer2Action = state.phase === 'PAIRED_ACTION_PHASE' && action.playerId === state.pairedPlayerId;
+      if (!isPlayer1Action && !isPlayer2Action) {
+        return { success: false, error: 'Progress Cards can only be played during your Action Phase.' };
+      }
+
+      switch (card.type) {
+        case 'crane': {
+          state.craneDiscountsRemaining = (state.craneDiscountsRemaining || 0) + 1;
+          break;
+        }
+
+        case 'medicine': {
+          state.medicineDiscountsRemaining = (state.medicineDiscountsRemaining || 0) + 1;
+          break;
+        }
+
+        case 'engineering': {
+          if ((player.cityWallsLeft ?? 0) <= 0) {
+            return { success: false, error: 'You have no City Walls left in your supply (max 3).' };
+          }
+          const targetV =
+            opts.cityVertexId ||
+            Object.values(state.board.buildings).find(
+              (b) => b.playerId === player.id && b.type === 'city' && !b.hasWall,
+            )?.vertexId;
+          if (!targetV) {
+            return { success: false, error: 'You have no City without a Wall to place a City Wall on.' };
+          }
+          const b = state.board.buildings[targetV];
+          if (!b || b.playerId !== player.id || b.type !== 'city' || b.hasWall) {
+            return { success: false, error: 'Select one of your Cities that does not already have a Wall.' };
+          }
+          b.hasWall = true;
+          player.cityWallsLeft--;
+          break;
+        }
+
+        case 'invention': {
+          const pair = opts.swapHexIds;
+          if (!Array.isArray(pair) || pair.length !== 2 || pair[0] === pair[1]) {
+            return { success: false, error: 'Select 2 different land hexes to swap number tokens.' };
+          }
+          const h1 = state.board.hexes[pair[0]];
+          const h2 = state.board.hexes[pair[1]];
+          if (!h1 || !h2 || typeof h1.number !== 'number' || typeof h2.number !== 'number') {
+            return { success: false, error: 'Both hexes must have number tokens.' };
+          }
+          const forbidden = [2, 6, 8, 12];
+          if (forbidden.includes(h1.number) || forbidden.includes(h2.number)) {
+            return { success: false, error: 'Cannot swap 2, 6, 8, or 12 number tokens with Inventor!' };
+          }
+          const temp = h1.number;
+          h1.number = h2.number;
+          h2.number = temp;
+          break;
+        }
+
+        case 'irrigation': {
+          let fieldsCount = 0;
+          for (const hex of Object.values(state.board.hexes)) {
+            if (hex.terrain !== 'fields') continue;
+            const touchesOwnBuilding = Object.values(state.board.vertices).some(
+              (v) => v.hexCoords.includes(hex.id) && state.board.buildings[v.id]?.playerId === player.id,
+            );
+            if (touchesOwnBuilding) fieldsCount++;
+          }
+          const gained = Math.min(fieldsCount * 2, state.resourceBank.wheat || 0);
+          player.resources.wheat += gained;
+          state.resourceBank.wheat -= gained;
+          break;
+        }
+
+        case 'mining': {
+          let mountainsCount = 0;
+          for (const hex of Object.values(state.board.hexes)) {
+            if (hex.terrain !== 'mountains') continue;
+            const touchesOwnBuilding = Object.values(state.board.vertices).some(
+              (v) => v.hexCoords.includes(hex.id) && state.board.buildings[v.id]?.playerId === player.id,
+            );
+            if (touchesOwnBuilding) mountainsCount++;
+          }
+          const gained = Math.min(mountainsCount * 2, state.resourceBank.ore || 0);
+          player.resources.ore += gained;
+          state.resourceBank.ore -= gained;
+          break;
+        }
+
+        case 'road_building': {
+          if (player.roadsLeft <= 0) {
+            return { success: false, error: 'You have no road pieces remaining in your supply.' };
+          }
+          pauseNormalTurnTimer(state);
+          state.freeRoadsRemaining = (state.freeRoadsRemaining || 0) + Math.min(2, player.roadsLeft);
+          refreshTurnTimer(state);
+          break;
+        }
+
+        case 'smithing': {
+          state.freeKnightPromotionsRemaining = (state.freeKnightPromotionsRemaining || 0) + 2;
+          if (Array.isArray(opts.knightVertexIds) && opts.knightVertexIds.length > 0) {
+            for (const vid of opts.knightVertexIds.slice(0, 2)) {
+              const k = state.board.knights?.[vid];
+              if (!k || k.playerId !== player.id || k.level >= 3 || k.promotedTurn === state.turnNumber) {
+                continue;
+              }
+              const nextLv = (k.level + 1) as 2 | 3;
+              if (nextLv === 3 && (player.cityImprovements?.politics || 0) < 3) continue;
+              if (nextLv === 2 && (player.strongKnightsLeft ?? 0) <= 0) continue;
+              if (nextLv === 3 && (player.mightyKnightsLeft ?? 0) <= 0) continue;
+              returnKnightLevelToSupply(player, k.level);
+              deductKnightLevelFromSupply(player, nextLv);
+              k.level = nextLv;
+              k.promotedTurn = state.turnNumber;
+              state.freeKnightPromotionsRemaining = Math.max(0, (state.freeKnightPromotionsRemaining || 0) - 1);
+            }
+          }
+          break;
+        }
+
+        case 'merchant': {
+          if (!opts.hexId || !state.board.hexes[opts.hexId]) {
+            return { success: false, error: 'Select a land hex adjacent to one of your buildings.' };
+          }
+          const hex = state.board.hexes[opts.hexId];
+          if (!hex.resource || hex.terrain === 'desert' || hex.terrain === 'sea') {
+            return { success: false, error: 'Merchant must be placed on a resource-producing land hex.' };
+          }
+          const touchesPlayerBuilding = Object.values(state.board.vertices).some(
+            (v) => v.hexCoords.includes(hex.id) && state.board.buildings[v.id]?.playerId === player.id,
+          );
+          if (!touchesPlayerBuilding) {
+            return { success: false, error: 'Merchant must be placed on a hex adjacent to one of your buildings.' };
+          }
+          state.merchant = {
+            hexId: hex.id,
+            ownerId: player.id,
+            resource: hex.resource,
+          };
+          break;
+        }
+
+        case 'merchant_fleet': {
+          if (!isValidTradeableType(opts.tradeableType)) {
+            return { success: false, error: 'Select a valid Resource or Commodity type for Merchant Fleet.' };
+          }
+          if (!state.merchantFleetTypes) state.merchantFleetTypes = [];
+          if (!state.merchantFleetTypes.includes(opts.tradeableType)) {
+            state.merchantFleetTypes.push(opts.tradeableType);
+          }
+          break;
+        }
+
+        case 'resource_monopoly': {
+          if (!isValidResourceType(opts.resource)) {
+            return { success: false, error: 'Select a valid Resource type for Resource Monopoly.' };
+          }
+          const res = opts.resource;
+          let totalTaken = 0;
+          for (const opp of Object.values(state.players)) {
+            if (opp.id === player.id) continue;
+            const take = Math.min(2, opp.resources[res] || 0);
+            if (take > 0) {
+              opp.resources[res] -= take;
+              totalTaken += take;
+            }
+          }
+          player.resources[res] += totalTaken;
+          break;
+        }
+
+        case 'trade_monopoly': {
+          if (!isValidCommodityType(opts.commodity)) {
+            return { success: false, error: 'Select a valid Commodity type for Trade Monopoly.' };
+          }
+          const comm = opts.commodity;
+          let totalTaken = 0;
+          for (const opp of Object.values(state.players)) {
+            if (opp.id === player.id) continue;
+            const take = Math.min(1, opp.commodities?.[comm] || 0);
+            if (take > 0) {
+              opp.commodities[comm] -= take;
+              totalTaken += take;
+            }
+          }
+          player.commodities[comm] += totalTaken;
+          break;
+        }
+
+        case 'commercial_harbor': {
+          const offers = opts.commercialHarborOffers || [];
+          if (!Array.isArray(offers) || offers.length === 0) {
+            return { success: false, error: 'Select at least 1 opponent who holds a Commodity and a Resource to offer.' };
+          }
+          const pendingOffers: NonNullable<GameState['pendingCommercialHarbor']> = [];
+          for (const offer of offers) {
+            const opp = state.players[offer.targetPlayerId];
+            if (!opp || opp.id === player.id) continue;
+            if (!isValidResourceType(offer.offeredResource)) continue;
+            if ((player.resources[offer.offeredResource] || 0) <= 0) continue;
+            if (sumCommodities(opp.commodities) <= 0) continue;
+
+            // Deduct offered resource from player and give to opponent; opponent must now give 1 commodity
+            player.resources[offer.offeredResource]--;
+            opp.resources[offer.offeredResource]++;
+            pendingOffers.push({
+              fromPlayerId: player.id,
+              targetPlayerId: opp.id,
+              offeredResource: offer.offeredResource,
+            });
+          }
+          if (pendingOffers.length === 0) {
+            return {
+              success: false,
+              error: 'Selected opponent has 0 Commodity cards (or you do not hold the offered Resource).',
+            };
+          }
+          pauseNormalTurnTimer(state);
+          state.pendingCommercialHarbor = pendingOffers;
+          refreshTurnTimer(state);
+          break;
+        }
+
+        case 'guild_dues': {
+          if (!opts.targetPlayerId || !state.players[opts.targetPlayerId] || opts.targetPlayerId === player.id) {
+            return { success: false, error: 'Select a valid opponent with more Victory Points than you.' };
+          }
+          const targetP = state.players[opts.targetPlayerId];
+          if (targetP.victoryPoints <= player.victoryPoints) {
+            return {
+              success: false,
+              error: 'Master Merchant can only target an opponent with strictly more Victory Points than you!',
+            };
+          }
+          const targetTotalCards =
+            Object.values(targetP.resources).reduce((s, n) => s + n, 0) + sumCommodities(targetP.commodities);
+          if (targetTotalCards === 0) {
+            return {
+              success: false,
+              error: 'That opponent has 0 Resource and Commodity cards in their hand.',
+            };
+          }
+          if (Array.isArray(opts.chosenCards) && opts.chosenCards.length > 0) {
+            for (const cType of opts.chosenCards.slice(0, 2)) {
+              if (isValidTradeableType(cType) && getPlayerCardSupply(targetP, cType) > 0) {
+                adjustPlayerCardSupply(targetP, cType, -1);
+                adjustPlayerCardSupply(player, cType, 1);
+              }
+            }
+          } else {
+            pauseNormalTurnTimer(state);
+            state.pendingGuildDues = {
+              playerId: player.id,
+              targetPlayerId: targetP.id,
+            };
+            refreshTurnTimer(state);
+          }
+          break;
+        }
+
+        case 'diplomacy': {
+          if (!opts.edgeId || !state.board.roads[opts.edgeId]) {
+            return { success: false, error: 'Select an open road on the board to remove.' };
+          }
+          if (!isOpenRoadEdge(state.board, opts.edgeId)) {
+            return {
+              success: false,
+              error: 'Diplomat can only remove an open road (unbound at one end by another road, building, or knight).',
+            };
+          }
+          const removedRoad = state.board.roads[opts.edgeId];
+          const roadOwner = state.players[removedRoad.playerId];
+          delete state.board.roads[opts.edgeId];
+          if (roadOwner) {
+            roadOwner.roadsLeft = Math.min(15, roadOwner.roadsLeft + 1);
+          }
+          if (removedRoad.playerId === player.id) {
+            pauseNormalTurnTimer(state);
+            state.freeRoadsRemaining = (state.freeRoadsRemaining || 0) + 1;
+            refreshTurnTimer(state);
+          }
+          evaluateAndNotifyLongestRoute(state);
+          break;
+        }
+
+        case 'encouragement': {
+          if (state.board.knights) {
+            for (const k of Object.values(state.board.knights)) {
+              if (k.playerId === player.id && !k.active) {
+                k.active = true;
+                k.activatedTurn = state.turnNumber;
+              }
+            }
+          }
+          break;
+        }
+
+        case 'espionage': {
+          if (!opts.targetPlayerId || !state.players[opts.targetPlayerId] || opts.targetPlayerId === player.id) {
+            return { success: false, error: 'Select a valid opponent with Progress Cards.' };
+          }
+          const targetP = state.players[opts.targetPlayerId];
+          if (!targetP.progressCards || targetP.progressCards.length === 0) {
+            return { success: false, error: 'That opponent has no Progress Cards to steal.' };
+          }
+          if (opts.stolenCardId) {
+            const sIdx = targetP.progressCards.findIndex((c) => c.id === opts.stolenCardId);
+            if (sIdx === -1) {
+              return { success: false, error: 'Selected Progress Card not found in opponent hand.' };
+            }
+            const [stolen] = targetP.progressCards.splice(sIdx, 1);
+            player.progressCards.push(stolen);
+            if (player.progressCards.length > 4) {
+              if (!state.pendingProgressDiscardPlayerIds) state.pendingProgressDiscardPlayerIds = [];
+              if (!state.pendingProgressDiscardPlayerIds.includes(player.id)) {
+                state.pendingProgressDiscardPlayerIds.push(player.id);
+              }
+            }
+          } else {
+            pauseNormalTurnTimer(state);
+            state.pendingEspionage = {
+              playerId: player.id,
+              targetPlayerId: targetP.id,
+            };
+            refreshTurnTimer(state);
+          }
+          break;
+        }
+
+        case 'intrigue': {
+          if (!opts.knightVertexId || !state.board.knights?.[opts.knightVertexId]) {
+            return { success: false, error: 'Select an opponent Knight touching one of your roads.' };
+          }
+          const oppKnight = state.board.knights[opts.knightVertexId];
+          if (oppKnight.playerId === player.id) {
+            return { success: false, error: 'Cannot displace your own Knight with Intrigue.' };
+          }
+          const touchesPlayerRoad = Object.values(state.board.roads).some(
+            (r) =>
+              r.playerId === player.id &&
+              (state.board.edges[r.edgeId]?.v1 === opts.knightVertexId ||
+                state.board.edges[r.edgeId]?.v2 === opts.knightVertexId),
+          );
+          if (!touchesPlayerRoad) {
+            return {
+              success: false,
+              error: 'Intrigue can only displace an opponent Knight on a vertex connected to one of your roads!',
+            };
+          }
+          delete state.board.knights[opts.knightVertexId];
+          handleDisplacedOpponentKnight(state, oppKnight, player.name);
+          evaluateAndNotifyLongestRoute(state);
+          break;
+        }
+
+        case 'sabotage': {
+          const discards: Record<string, number> = {};
+          for (const opp of Object.values(state.players)) {
+            if (opp.id === player.id) continue;
+            if (opp.victoryPoints >= player.victoryPoints) {
+              const total =
+                Object.values(opp.resources).reduce((s, n) => s + n, 0) +
+                sumCommodities(opp.commodities);
+              const half = Math.floor(total / 2);
+              if (half > 0) {
+                discards[opp.id] = half;
+              }
+            }
+          }
+          if (Object.keys(discards).length > 0) {
+            pauseNormalTurnTimer(state);
+            state.postDiscardPhase = state.phase;
+            state.pendingDiscards = discards;
+            state.phase = 'DISCARD_PHASE';
+            refreshTurnTimer(state);
+          }
+          break;
+        }
+
+        case 'taxation': {
+          if (!state.robberActive) {
+            return {
+              success: false,
+              error: 'Bishop cannot move the Robber until after the first Barbarian Attack!',
+            };
+          }
+          if (
+            !opts.hexId ||
+            opts.hexId === state.board.robberHexId ||
+            !state.board.hexes[opts.hexId] ||
+            state.board.hexes[opts.hexId].terrain === 'sea'
+          ) {
+            return { success: false, error: 'Select a different valid land hex to move the Robber to.' };
+          }
+          if (!isValidRobberHex(state, opts.hexId, action.playerId)) {
+            return {
+              success: false,
+              error: 'Friendly Robber is active: cannot place the Robber on a hex adjacent to a player at starting Victory Points!',
+            };
+          }
+          const oldHex = state.board.hexes[state.board.robberHexId];
+          if (oldHex) oldHex.hasRobber = false;
+          state.board.hexes[opts.hexId].hasRobber = true;
+          state.board.robberHexId = opts.hexId;
+
+          const adjacentOpponents = new Set<string>();
+          for (const v of Object.values(state.board.vertices)) {
+            if (v.hexCoords.includes(opts.hexId)) {
+              const b = state.board.buildings[v.id];
+              if (b && b.playerId !== player.id) {
+                adjacentOpponents.add(b.playerId);
+              }
+            }
+          }
+          for (const victimId of adjacentOpponents) {
+            const victim = state.players[victimId];
+            if (victim) {
+              stealRandomCard(player, victim, state);
+            }
+          }
+          break;
+        }
+
+        case 'treason': {
+          if (!opts.targetPlayerId || !state.players[opts.targetPlayerId] || opts.targetPlayerId === player.id) {
+            return { success: false, error: 'Select an opponent who has at least 1 Knight on the board.' };
+          }
+          const targetKnights = Object.values(state.board.knights || {}).filter(
+            (k) => k.playerId === opts.targetPlayerId,
+          );
+          if (targetKnights.length === 0) {
+            return { success: false, error: 'That opponent has no Knights on the board.' };
+          }
+          pauseNormalTurnTimer(state);
+          state.pendingDeserter = {
+            requesterId: player.id,
+            targetPlayerId: opts.targetPlayerId,
+            stage: 'choose_victim_knight',
+          };
+          refreshTurnTimer(state);
+          break;
+        }
+
+        case 'wedding': {
+          const pendingWeddings: string[] = [];
+          for (const opp of Object.values(state.players)) {
+            if (opp.id === player.id) continue;
+            if (opp.victoryPoints > player.victoryPoints) {
+              const total =
+                Object.values(opp.resources).reduce((s, n) => s + n, 0) +
+                sumCommodities(opp.commodities);
+              if (total > 0 && total <= 2) {
+                // Automatically transfer all 1 or 2 cards
+                for (const t of VALID_TRADEABLES) {
+                  const amt = getPlayerCardSupply(opp, t);
+                  if (amt > 0) {
+                    adjustPlayerCardSupply(opp, t, -amt);
+                    adjustPlayerCardSupply(player, t, amt);
+                  }
+                }
+              } else if (total > 2) {
+                pendingWeddings.push(opp.id);
+              }
+            }
+          }
+          if (pendingWeddings.length > 0) {
+            pauseNormalTurnTimer(state);
+            state.pendingWeddingPlayerIds = pendingWeddings;
+            state.weddingRequesterId = player.id;
+            refreshTurnTimer(state);
+          } else {
+            state.pendingWeddingPlayerIds = [];
+            state.weddingRequesterId = null;
+          }
+          break;
+        }
+
+        default:
+          return { success: false, error: 'This Progress Card cannot be played manually.' };
+      }
+
+      // Consume the played card and return it to the bottom of its discipline deck
+      const currentIdx = player.progressCards.findIndex((c) => c.id === card.id);
+      if (currentIdx !== -1) {
+        player.progressCards.splice(currentIdx, 1);
+      }
+      player.playedProgressCards.push(card);
+      state.progressDecks?.[card.discipline].push(card);
+
+      state.actionLog.push({
+        id: `log_${Date.now()}_${Math.random()}`,
+        timestamp: Date.now(),
+        playerId: player.id,
+        message: `📜 ${player.name} played ${meta.name} (${card.discipline})!`,
+        category: 'card',
+      });
+
+      syncPlayerVPs(state);
+      return { success: true };
+    }
+
+    case 'DISCARD_PROGRESS_CARD': {
+      const idx = player.progressCards.findIndex((c) => c.id === action.cardId);
+      if (idx === -1) {
+        return { success: false, error: 'Progress Card not found in your hand.' };
+      }
+      if (player.progressCards.length <= 4) {
+        return { success: false, error: 'You only need to discard Progress Cards when holding more than 4.' };
+      }
+      const [discarded] = player.progressCards.splice(idx, 1);
+      state.progressDecks?.[discarded.discipline].push(discarded);
+
+      if (player.progressCards.length <= 4 && state.pendingProgressDiscardPlayerIds) {
+        state.pendingProgressDiscardPlayerIds = state.pendingProgressDiscardPlayerIds.filter(
+          (id) => id !== player.id,
+        );
+      }
+
+      state.actionLog.push({
+        id: `log_${Date.now()}_${Math.random()}`,
+        timestamp: Date.now(),
+        playerId: player.id,
+        message: `${player.name} discarded a ${discarded.discipline} Progress Card (4-card hand limit).`,
+        category: 'card',
+      });
+
+      syncPlayerVPs(state);
+      return { success: true };
+    }
+
+    case 'CHOOSE_AQUEDUCT_RESOURCE': {
+      if (!state.pendingAqueductPlayerIds?.includes(action.playerId)) {
+        return { success: false, error: 'You do not have a pending Aqueduct resource choice.' };
+      }
+      if (!isValidResourceType(action.resource)) {
+        return { success: false, error: 'Select a valid Resource type.' };
+      }
+      if ((state.resourceBank[action.resource] || 0) <= 0) {
+        return { success: false, error: `Bank has no ${action.resource} remaining.` };
+      }
+
+      player.resources[action.resource]++;
+      state.resourceBank[action.resource]--;
+      state.pendingAqueductPlayerIds = state.pendingAqueductPlayerIds.filter((id) => id !== action.playerId);
+
+      state.actionLog.push({
+        id: `log_${Date.now()}_${Math.random()}`,
+        timestamp: Date.now(),
+        playerId: player.id,
+        message: `🏛️ ${player.name} took 1 ${action.resource} using their Aqueduct!`,
+        category: 'dice',
+      });
+
+      resumeTimerIfCKPromptsCleared(state);
+      syncPlayerVPs(state);
+      return { success: true };
+    }
+
+    case 'CHOOSE_BARBARIAN_REWARD': {
+      if (!state.pendingBarbarianRewardPlayerIds?.includes(action.playerId)) {
+        return { success: false, error: 'You do not have a pending Defender of Catan reward choice.' };
+      }
+      if (!isValidDiscipline(action.discipline)) {
+        return { success: false, error: 'Select a valid Progress Card discipline (trade, politics, or science).' };
+      }
+
+      state.pendingBarbarianRewardPlayerIds = state.pendingBarbarianRewardPlayerIds.filter(
+        (id) => id !== action.playerId,
+      );
+      drawProgressCardForPlayer(state, player, action.discipline);
+
+      resumeTimerIfCKPromptsCleared(state);
+      syncPlayerVPs(state);
+      return { success: true };
+    }
+
+    case 'CHOOSE_PILLAGED_CITY': {
+      if (!state.pendingBarbarianPillagePlayerIds?.includes(action.playerId)) {
+        return { success: false, error: 'You do not need to select a City to pillage.' };
+      }
+      if (!pillageCityAtVertex(state, action.playerId, action.vertexId)) {
+        return { success: false, error: 'Must select one of your non-Metropolis Cities.' };
+      }
+      state.pendingBarbarianPillagePlayerIds = state.pendingBarbarianPillagePlayerIds.filter(
+        (id) => id !== action.playerId,
+      );
+
+      evaluateAndNotifyHarborMaster(state);
+      resumeTimerIfCKPromptsCleared(state);
+      syncPlayerVPs(state);
+      return { success: true };
+    }
+
+    case 'RESOLVE_GUILD_DUES': {
+      if (!state.pendingGuildDues || state.pendingGuildDues.playerId !== action.playerId) {
+        return { success: false, error: 'No pending Master Merchant selection.' };
+      }
+      const targetP = state.players[state.pendingGuildDues.targetPlayerId];
+      if (!targetP) {
+        state.pendingGuildDues = null;
+        resumeTimerIfCKPromptsCleared(state);
+        return { success: false, error: 'Target player not found.' };
+      }
+      const targetTotalCards =
+        Object.values(targetP.resources).reduce((s, n) => s + n, 0) + sumCommodities(targetP.commodities);
+      if (targetTotalCards === 0) {
+        state.pendingGuildDues = null;
+        resumeTimerIfCKPromptsCleared(state);
+        return { success: true };
+      }
+      if (!Array.isArray(action.cards) || action.cards.length === 0 || action.cards.length > 2) {
+        return { success: false, error: 'Select up to 2 cards from the opponent hand.' };
+      }
+
+      for (const cType of action.cards.slice(0, 2)) {
+        if (isValidTradeableType(cType) && getPlayerCardSupply(targetP, cType) > 0) {
+          adjustPlayerCardSupply(targetP, cType, -1);
+          adjustPlayerCardSupply(player, cType, 1);
+        }
+      }
+      state.pendingGuildDues = null;
+
+      state.actionLog.push({
+        id: `log_${Date.now()}_${Math.random()}`,
+        timestamp: Date.now(),
+        playerId: player.id,
+        message: `${player.name} collected ${action.cards.length} card(s) from ${targetP.name} via Master Merchant.`,
+        category: 'card',
+      });
+
+      resumeTimerIfCKPromptsCleared(state);
+      syncPlayerVPs(state);
+      return { success: true };
+    }
+
+    case 'RESOLVE_ESPIONAGE': {
+      if (!state.pendingEspionage || state.pendingEspionage.playerId !== action.playerId) {
+        return { success: false, error: 'No pending Spy selection.' };
+      }
+      const targetP = state.players[state.pendingEspionage.targetPlayerId];
+      if (!targetP) {
+        state.pendingEspionage = null;
+        resumeTimerIfCKPromptsCleared(state);
+        return { success: false, error: 'Target player not found.' };
+      }
+      const idx = targetP.progressCards.findIndex((c) => c.id === action.cardId);
+      if (idx === -1) {
+        return { success: false, error: 'Selected Progress Card not found in opponent hand.' };
+      }
+      const [stolen] = targetP.progressCards.splice(idx, 1);
+      player.progressCards.push(stolen);
+      if (player.progressCards.length > 4) {
+        if (!state.pendingProgressDiscardPlayerIds) state.pendingProgressDiscardPlayerIds = [];
+        if (!state.pendingProgressDiscardPlayerIds.includes(player.id)) {
+          state.pendingProgressDiscardPlayerIds.push(player.id);
+        }
+      }
+      state.pendingEspionage = null;
+
+      state.actionLog.push({
+        id: `log_${Date.now()}_${Math.random()}`,
+        timestamp: Date.now(),
+        playerId: player.id,
+        message: `🕵️ ${player.name} stole a Progress Card from ${targetP.name} using Spy!`,
+        category: 'card',
+      });
+
+      resumeTimerIfCKPromptsCleared(state);
+      syncPlayerVPs(state);
+      return { success: true };
+    }
+
+    case 'GIVE_WEDDING_CARDS': {
+      if (!state.pendingWeddingPlayerIds?.includes(action.playerId)) {
+        return { success: false, error: 'You do not need to give Wedding gift cards.' };
+      }
+      if (!isValidTradePayload(action.cards, true)) {
+        return { success: false, error: 'Invalid card selection.' };
+      }
+      const total = sumTradePayload(action.cards, true);
+      if (total !== 2) {
+        return { success: false, error: 'You must select exactly 2 cards to give as a Wedding gift.' };
+      }
+      if (!canAffordTradePayload(player.resources, player.commodities, action.cards, true)) {
+        return { success: false, error: 'You do not hold the selected cards.' };
+      }
+
+      const recipientId = state.weddingRequesterId || state.currentTurnPlayerId;
+      const recipient = state.players[recipientId];
+      deductTradePayloadFromPlayer(player, action.cards);
+      if (recipient) {
+        addTradePayloadToPlayer(recipient, action.cards);
+      }
+      state.pendingWeddingPlayerIds = state.pendingWeddingPlayerIds.filter((id) => id !== action.playerId);
+      if (state.pendingWeddingPlayerIds.length === 0) {
+        state.weddingRequesterId = null;
+      }
+
+      state.actionLog.push({
+        id: `log_${Date.now()}_${Math.random()}`,
+        timestamp: Date.now(),
+        playerId: player.id,
+        message: `💍 ${player.name} gave 2 cards to ${recipient?.name || 'the bride/groom'} for Wedding.`,
+        category: 'card',
+      });
+
+      resumeTimerIfCKPromptsCleared(state);
+      syncPlayerVPs(state);
+      return { success: true };
+    }
+
+    case 'RESPOND_COMMERCIAL_HARBOR': {
+      const idx = (state.pendingCommercialHarbor || []).findIndex(
+        (o) => o.targetPlayerId === action.playerId,
+      );
+      if (idx === -1 || !state.pendingCommercialHarbor) {
+        return { success: false, error: 'No pending Commercial Harbor exchange for you.' };
+      }
+      if (!isValidCommodityType(action.commodity) || (player.commodities[action.commodity] || 0) <= 0) {
+        return { success: false, error: 'You must select a Commodity card you hold.' };
+      }
+      const offer = state.pendingCommercialHarbor[idx];
+      const requester = state.players[offer.fromPlayerId];
+      player.commodities[action.commodity]--;
+      if (requester) {
+        requester.commodities[action.commodity] = (requester.commodities[action.commodity] || 0) + 1;
+      }
+      state.pendingCommercialHarbor.splice(idx, 1);
+
+      state.actionLog.push({
+        id: `log_${Date.now()}_${Math.random()}`,
+        timestamp: Date.now(),
+        playerId: player.id,
+        message: `⚓ ${player.name} gave 1 commodity to ${requester?.name || 'player'} for Commercial Harbor.`,
+        category: 'trade',
+      });
+
+      resumeTimerIfCKPromptsCleared(state);
+      syncPlayerVPs(state);
+      return { success: true };
+    }
+
+    case 'CHOOSE_DESERTER_KNIGHT': {
+      if (
+        !state.pendingDeserter ||
+        state.pendingDeserter.stage !== 'choose_victim_knight' ||
+        state.pendingDeserter.targetPlayerId !== action.playerId
+      ) {
+        return { success: false, error: 'You do not have a pending Deserter Knight selection.' };
+      }
+      const k = state.board.knights?.[action.vertexId];
+      if (!k || k.playerId !== action.playerId) {
+        return { success: false, error: 'Select one of your Knights on the board.' };
+      }
+
+      delete state.board.knights![action.vertexId];
+      returnKnightLevelToSupply(player, k.level);
+
+      const requester = state.players[state.pendingDeserter.requesterId];
+      const hasValidSpot = Object.keys(state.board.vertices).some((vid) =>
+        isValidKnightRecruitVertex(state, state.pendingDeserter!.requesterId, vid),
+      );
+      const hasAvailableKnightPiece =
+        requester &&
+        ((requester.basicKnightsLeft ?? 0) > 0 ||
+          (k.level >= 2 && (requester.strongKnightsLeft ?? 0) > 0) ||
+          (k.level >= 3 && (requester.mightyKnightsLeft ?? 0) > 0));
+
+      if (requester && hasValidSpot && hasAvailableKnightPiece) {
+        state.pendingDeserter = {
+          ...state.pendingDeserter,
+          stage: 'place_new_knight',
+          removedLevel: k.level,
+          removedActive: k.active,
+        };
+        refreshTurnTimer(state);
+      } else {
+        state.pendingDeserter = null;
+        resumeTimerIfCKPromptsCleared(state);
+      }
+
+      state.actionLog.push({
+        id: `log_${Date.now()}_${Math.random()}`,
+        timestamp: Date.now(),
+        playerId: player.id,
+        message: `🏳️ ${player.name}'s Level ${k.level} Knight deserted!`,
+        category: 'card',
+      });
+
+      evaluateAndNotifyLongestRoute(state);
+      syncPlayerVPs(state);
+      return { success: true };
+    }
+
+    case 'PLACE_DESERTER_KNIGHT': {
+      if (
+        !state.pendingDeserter ||
+        state.pendingDeserter.stage !== 'place_new_knight' ||
+        state.pendingDeserter.requesterId !== action.playerId
+      ) {
+        return { success: false, error: 'You do not have a pending Deserter Knight to place.' };
+      }
+      if (!isValidKnightRecruitVertex(state, action.playerId, action.vertexId)) {
+        return { success: false, error: 'Select an empty vertex connected to one of your roads.' };
+      }
+
+      const maxLevel = state.pendingDeserter.removedLevel || 1;
+      let placeLevel: 1 | 2 | 3 | null = null;
+      const candidateLevels: Array<1 | 2 | 3> = [3, 2, 1].filter((lv) => lv <= maxLevel) as Array<1 | 2 | 3>;
+      for (const lv of candidateLevels) {
+        if (deductKnightLevelFromSupply(player, lv)) {
+          placeLevel = lv;
+          break;
+        }
+      }
+
+      if (!placeLevel) {
+        state.pendingDeserter = null;
+        resumeTimerIfCKPromptsCleared(state);
+        return { success: false, error: 'You have no available Knight pieces of equal or lower level.' };
+      }
+
+      if (!state.board.knights) state.board.knights = {};
+      state.board.knights[action.vertexId] = {
+        id: `k_${action.playerId}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        playerId: action.playerId,
+        vertexId: action.vertexId,
+        level: placeLevel,
+        active: Boolean(state.pendingDeserter.removedActive),
+        recruitedTurn: state.turnNumber,
+        activatedTurn: state.pendingDeserter.removedActive ? state.turnNumber : null,
+        promotedTurn: null,
+        actionTakenTurn: null,
+      };
+      state.pendingDeserter = null;
+
+      state.actionLog.push({
+        id: `log_${Date.now()}_${Math.random()}`,
+        timestamp: Date.now(),
+        playerId: player.id,
+        message: `🛡️ ${player.name} placed a Level ${placeLevel} Deserter Knight on the board!`,
+        category: 'card',
+      });
+
+      resumeTimerIfCKPromptsCleared(state);
+      evaluateAndNotifyLongestRoute(state);
+      syncPlayerVPs(state);
+      return { success: true };
+    }
+
     case 'BUY_DEV_CARD': {
+      if (isCK) {
+        return {
+          success: false,
+          error: 'Development Cards are replaced by City Improvements and Progress Cards in Cities & Knights.',
+        };
+      }
       const isPlayer1Action = state.phase === 'ACTION_PHASE' && action.playerId === state.currentTurnPlayerId;
       const isPlayer2Action = state.phase === 'PAIRED_ACTION_PHASE' && action.playerId === state.pairedPlayerId;
       if (!isPlayer1Action && !isPlayer2Action) {
@@ -813,6 +2676,9 @@ export function applyAction(
     }
 
     case 'PLAY_DEV_CARD': {
+      if (isCK) {
+        return { success: false, error: 'Use Progress Cards in Cities & Knights.' };
+      }
       const isPlayer1Action =
         (state.phase === 'ACTION_PHASE' || state.phase === 'TURN_START') && action.playerId === state.currentTurnPlayerId;
       const isPlayer2Action = state.phase === 'PAIRED_ACTION_PHASE' && action.playerId === state.pairedPlayerId;
@@ -834,7 +2700,7 @@ export function applyAction(
         return { success: false, error: 'Only Knight cards can be played before rolling the dice.' };
       }
 
-      if (card.boughtTurn === state.turnNumber) {
+      if (card.boughtTurn === state.turnNumber && !state.settings?.houseRules?.playDevCardSameTurn) {
         return { success: false, error: 'Cannot play a Development Card on the turn you bought it.' };
       }
 
@@ -1000,11 +2866,12 @@ export function applyAction(
         return { success: false, error: 'Not your action phase.' };
       }
 
-      if (!isValidResourceType(action.giving) || !isValidResourceType(action.asking)) {
-        return { success: false, error: 'Invalid resource type for bank trade.' };
+      const validCheck = isCK ? isValidTradeableType : isValidResourceType;
+      if (!validCheck(action.giving) || !validCheck(action.asking)) {
+        return { success: false, error: 'Invalid card type for bank trade.' };
       }
       if (action.giving === action.asking) {
-        return { success: false, error: 'Cannot trade a resource for the same resource.' };
+        return { success: false, error: 'Cannot trade a card for the same card.' };
       }
       if (
         typeof action.ratio !== 'number' ||
@@ -1014,22 +2881,22 @@ export function applyAction(
         return { success: false, error: 'Invalid maritime trade ratio.' };
       }
 
-      const bestRatio = getPlayerMaritimeRatio(player.id, action.giving, state.board);
+      const bestRatio = getPlayerMaritimeRatio(player.id, action.giving, state.board, state);
       if (action.ratio < bestRatio) {
-        return { success: false, error: `Your best maritime trade ratio for ${action.giving} is ${bestRatio}:1.` };
+        return { success: false, error: `Your best bank trade ratio for ${action.giving} is ${bestRatio}:1.` };
       }
-      if ((player.resources[action.giving] || 0) < action.ratio) {
+      if (getPlayerCardSupply(player, action.giving) < action.ratio) {
         return { success: false, error: `You need at least ${action.ratio} ${action.giving} to trade.` };
       }
-      if ((state.resourceBank[action.asking] || 0) < 1) {
+      if (getBankSupply(state, action.asking) < 1) {
         return { success: false, error: `Bank has no ${action.asking} remaining.` };
       }
 
-      player.resources[action.giving] -= action.ratio;
-      state.resourceBank[action.giving] += action.ratio;
+      adjustPlayerCardSupply(player, action.giving, -action.ratio);
+      adjustBankSupply(state, action.giving, action.ratio);
 
-      player.resources[action.asking] += 1;
-      state.resourceBank[action.asking] -= 1;
+      adjustPlayerCardSupply(player, action.asking, 1);
+      adjustBankSupply(state, action.asking, -1);
 
       state.actionLog.push({
         id: `log_${Date.now()}_${Math.random()}`,
@@ -1050,14 +2917,16 @@ export function applyAction(
         return { success: false, error: 'Not your action phase.' };
       }
 
-      if (!isValidResourcePayload(action.giving) || !isValidResourcePayload(action.asking)) {
+      if (!isValidTradePayload(action.giving, isCK) || !isValidTradePayload(action.asking, isCK)) {
         return {
           success: false,
-          error: 'Invalid resource quantities: must be non-negative integers.',
+          error: 'Invalid card quantities: must be non-negative integers.',
         };
       }
 
-      for (const r of VALID_RESOURCES) {
+      const validKeys = isCK ? VALID_TRADEABLES : VALID_RESOURCES;
+
+      for (const r of validKeys) {
         if ((action.giving[r] || 0) > 0 && (action.asking[r] || 0) > 0) {
           return {
             success: false,
@@ -1066,21 +2935,21 @@ export function applyAction(
         }
       }
 
-      if (!canAfford(player.resources, action.giving)) {
-        return { success: false, error: 'You do not hold the resources you are offering.' };
+      if (!canAffordTradePayload(player.resources, player.commodities, action.giving, isCK)) {
+        return { success: false, error: 'You do not hold the cards you are offering.' };
       }
 
-      // Compute total credits earned using the best harbor ratio per resource
+      // Compute total credits earned using the best harbor/Trading House/Merchant ratio per card type
       let totalCreditsEarned = 0;
       const givenDescriptions: string[] = [];
-      for (const res of VALID_RESOURCES) {
+      for (const res of validKeys) {
         const count = action.giving[res] || 0;
         if (count <= 0) continue;
-        const bestRatio = getPlayerMaritimeRatio(player.id, res, state.board);
+        const bestRatio = getPlayerMaritimeRatio(player.id, res, state.board, state);
         if (count % bestRatio !== 0) {
           return {
             success: false,
-            error: `${res} must be given in multiples of your best harbor rate (${bestRatio}:1).`,
+            error: `${res} must be given in multiples of your best bank rate (${bestRatio}:1).`,
           };
         }
         totalCreditsEarned += count / bestRatio;
@@ -1089,10 +2958,10 @@ export function applyAction(
 
       const askedDescriptions: string[] = [];
       let totalAskedCards = 0;
-      for (const res of VALID_RESOURCES) {
+      for (const res of validKeys) {
         const count = action.asking[res] || 0;
         if (count <= 0) continue;
-        if ((state.resourceBank[res] || 0) < count) {
+        if (getBankSupply(state, res) < count) {
           return { success: false, error: `Bank does not have enough ${res} remaining.` };
         }
         totalAskedCards += count;
@@ -1100,7 +2969,7 @@ export function applyAction(
       }
 
       if (totalCreditsEarned <= 0 || totalAskedCards <= 0) {
-        return { success: false, error: 'Must give and ask for at least 1 resource.' };
+        return { success: false, error: 'Must give and ask for at least 1 card.' };
       }
 
       if (totalCreditsEarned !== totalAskedCards) {
@@ -1110,11 +2979,18 @@ export function applyAction(
         };
       }
 
-      player.resources = deductCost(player.resources, action.giving);
-      state.resourceBank = addResources(state.resourceBank, action.giving);
-
-      player.resources = addResources(player.resources, action.asking);
-      state.resourceBank = deductCost(state.resourceBank, action.asking);
+      for (const res of validKeys) {
+        const giveAmt = action.giving[res] || 0;
+        if (giveAmt > 0) {
+          adjustPlayerCardSupply(player, res, -giveAmt);
+          adjustBankSupply(state, res, giveAmt);
+        }
+        const askAmt = action.asking[res] || 0;
+        if (askAmt > 0) {
+          adjustPlayerCardSupply(player, res, askAmt);
+          adjustBankSupply(state, res, -askAmt);
+        }
+      }
 
       state.actionLog.push({
         id: `log_${Date.now()}_${Math.random()}`,
@@ -1134,13 +3010,13 @@ export function applyAction(
       }
 
       const freeTradesEnabled = Boolean(state.settings?.houseRules?.freeTrades);
-      const validation = validateDomesticTradePayloads(action.giving, action.asking, freeTradesEnabled);
+      const validation = validateDomesticTradePayloads(action.giving, action.asking, freeTradesEnabled, isCK);
       if (!validation.valid) {
         return { success: false, error: validation.error };
       }
 
-      if (!canAfford(player.resources, validation.cleanGiving)) {
-        return { success: false, error: 'You do not hold the resources you are offering.' };
+      if (!canAffordTradePayload(player.resources, player.commodities, validation.cleanGiving, isCK)) {
+        return { success: false, error: 'You do not hold the cards you are offering.' };
       }
 
       const offer: TradeOffer = {
@@ -1197,19 +3073,20 @@ export function applyAction(
           state.activeTradeOffer.giving,
           state.activeTradeOffer.asking,
           freeTradesEnabled,
+          isCK,
         );
         if (!validation.valid) {
           return { success: false, error: validation.error };
         }
 
-        // Recheck BOTH participants' resources immediately before completing the trade!
-        if (!canAfford(activeP.resources, validation.cleanGiving)) {
+        // Recheck BOTH participants' cards immediately before completing the trade!
+        if (!canAffordTradePayload(activeP.resources, activeP.commodities, validation.cleanGiving, isCK)) {
           return {
             success: false,
-            error: `${activeP.name} no longer holds the resources offered in this trade.`,
+            error: `${activeP.name} no longer holds the cards offered in this trade.`,
           };
         }
-        if (!canAfford(player.resources, validation.cleanAsking)) {
+        if (!canAffordTradePayload(player.resources, player.commodities, validation.cleanAsking, isCK)) {
           return { success: false, error: 'You do not have the requested cards to accept.' };
         }
 
@@ -1218,12 +3095,10 @@ export function applyAction(
         state.activeTradeOffer = null;
       } else {
         state.activeTradeOffer.status[action.playerId] = 'declined';
-        // Remove any prior counter-offers submitted by this declining player
         state.activeTradeOffer.counterOffers = state.activeTradeOffer.counterOffers.filter(
           (c) => c.fromPlayerId !== action.playerId,
         );
 
-        // If all eligible players have declined and no counter-offers remain, dismiss the trade offer completely
         const offer = state.activeTradeOffer;
         const targetIds =
           offer.targetPlayerId === 'all' ? Object.keys(offer.status) : [offer.targetPlayerId];
@@ -1255,20 +3130,21 @@ export function applyAction(
       }
 
       const freeTradesEnabled = Boolean(state.settings?.houseRules?.freeTrades);
-      const validation = validateDomesticTradePayloads(action.giving, action.asking, freeTradesEnabled);
+      const validation = validateDomesticTradePayloads(action.giving, action.asking, freeTradesEnabled, isCK);
       if (!validation.valid) {
         return { success: false, error: validation.error };
       }
 
-      // Reject if the counter-offer is identical to the original trade offer
+      const validKeys = isCK ? VALID_TRADEABLES : VALID_RESOURCES;
+
       const origGiving = state.activeTradeOffer.giving;
       const origAsking = state.activeTradeOffer.asking;
-      const matchesOriginalDeal = VALID_RESOURCES.every(
+      const matchesOriginalDeal = validKeys.every(
         (r) =>
           (validation.cleanGiving[r] || 0) === (origAsking[r] || 0) &&
           (validation.cleanAsking[r] || 0) === (origGiving[r] || 0),
       );
-      const matchesOriginalSameDirection = VALID_RESOURCES.every(
+      const matchesOriginalSameDirection = validKeys.every(
         (r) =>
           (validation.cleanGiving[r] || 0) === (origGiving[r] || 0) &&
           (validation.cleanAsking[r] || 0) === (origAsking[r] || 0),
@@ -1280,9 +3156,8 @@ export function applyAction(
         };
       }
 
-      // Reject if the exact same counter-offer has already been offered
       const isDuplicateCounter = state.activeTradeOffer.counterOffers.some((c) =>
-        VALID_RESOURCES.every(
+        validKeys.every(
           (r) =>
             (c.giving[r] || 0) === (validation.cleanGiving[r] || 0) &&
             (c.asking[r] || 0) === (validation.cleanAsking[r] || 0),
@@ -1295,7 +3170,7 @@ export function applyAction(
         };
       }
 
-      if (!canAfford(player.resources, validation.cleanGiving)) {
+      if (!canAffordTradePayload(player.resources, player.commodities, validation.cleanGiving, isCK)) {
         return { success: false, error: 'You do not have the cards for your counter-offer.' };
       }
 
@@ -1332,7 +3207,7 @@ export function applyAction(
       if (!counter) return { success: false, error: 'Counter-offer not found.' };
 
       const freeTradesEnabled = Boolean(state.settings?.houseRules?.freeTrades);
-      const validation = validateDomesticTradePayloads(counter.giving, counter.asking, freeTradesEnabled);
+      const validation = validateDomesticTradePayloads(counter.giving, counter.asking, freeTradesEnabled, isCK);
       if (!validation.valid) {
         return { success: false, error: validation.error };
       }
@@ -1340,10 +3215,10 @@ export function applyAction(
       const counterPlayer = state.players[counter.fromPlayerId];
       if (!counterPlayer) return { success: false, error: 'Counter player not found.' };
 
-      if (!canAfford(player.resources, validation.cleanAsking)) {
+      if (!canAffordTradePayload(player.resources, player.commodities, validation.cleanAsking, isCK)) {
         return { success: false, error: 'You no longer have the cards required for this counter-offer.' };
       }
-      if (!canAfford(counterPlayer.resources, validation.cleanGiving)) {
+      if (!canAffordTradePayload(counterPlayer.resources, counterPlayer.commodities, validation.cleanGiving, isCK)) {
         return { success: false, error: 'Other player no longer has the cards for this counter-offer.' };
       }
 
@@ -1386,10 +3261,47 @@ export function applyAction(
         }
       }
 
-      // Now safe to clear turn-scoped offers & temporary road counters
+      // In Cities & Knights, block ending the turn while mandatory sub-prompts are still waiting on a player
+      if (isCK && !isSystemTimeout && hasAnyPendingCKPrompts(state)) {
+        return {
+          success: false,
+          error: 'Please finish resolving the active prompt before ending the turn!',
+        };
+      }
+
+      // In Cities & Knights, enforce the 4 Progress Card hand limit at the end of turn (auto-discard if timeout)
+      if (isCK && player.progressCards.length > 4) {
+        if (!isSystemTimeout) {
+          return {
+            success: false,
+            error: `You hold ${player.progressCards.length} Progress Cards (max 4). Play or discard down to 4 before ending your turn!`,
+          };
+        }
+        while (player.progressCards.length > 4) {
+          const discarded = player.progressCards.pop()!;
+          state.progressDecks?.[discarded.discipline].push(discarded);
+        }
+      }
+      if (isCK && (state.pendingProgressDiscardPlayerIds?.length || 0) > 0) {
+        for (const pid of [...(state.pendingProgressDiscardPlayerIds || [])]) {
+          const p = state.players[pid];
+          while (p && p.progressCards.length > 4) {
+            const d = p.progressCards.pop()!;
+            state.progressDecks?.[d.discipline].push(d);
+          }
+        }
+        state.pendingProgressDiscardPlayerIds = [];
+      }
+
+      // Clear turn-scoped offers & temporary modifiers
       state.activeTradeOffer = null;
       state.freeRoadsRemaining = 0;
       state.savedActionRemainingMs = null;
+      state.craneDiscountsRemaining = 0;
+      state.medicineDiscountsRemaining = 0;
+      state.freeKnightPromotionsRemaining = 0;
+      state.merchantFleetTypes = [];
+      state.pendingAlchemyRoll = null;
 
       if (!is56) {
         const nextIndex = (orderedIds.indexOf(state.currentTurnPlayerId) + 1) % orderedIds.length;
@@ -1436,6 +3348,7 @@ export function applyAction(
         }
       }
 
+      evaluateAndNotifyHarborMaster(state);
       refreshTurnTimer(state);
       syncPlayerVPs(state);
       return { success: true };
@@ -1446,10 +3359,154 @@ export function applyAction(
   }
 }
 
+function autoResolvePendingCKPrompts(state: GameState) {
+  if (state.pendingBarbarianPillagePlayerIds && state.pendingBarbarianPillagePlayerIds.length > 0) {
+    for (const pid of [...state.pendingBarbarianPillagePlayerIds]) {
+      const cities = getPlayerVulnerableCityVertices(state, pid);
+      if (cities.length > 0) {
+        pillageCityAtVertex(state, pid, cities[0]);
+      }
+    }
+    state.pendingBarbarianPillagePlayerIds = [];
+    evaluateAndNotifyHarborMaster(state);
+  }
+  if (state.pendingBarbarianRewardPlayerIds && state.pendingBarbarianRewardPlayerIds.length > 0) {
+    for (const pid of [...state.pendingBarbarianRewardPlayerIds]) {
+      const p = state.players[pid];
+      if (p) drawProgressCardForPlayer(state, p, 'science');
+    }
+    state.pendingBarbarianRewardPlayerIds = [];
+  }
+  if (state.pendingAqueductPlayerIds && state.pendingAqueductPlayerIds.length > 0) {
+    for (const pid of [...state.pendingAqueductPlayerIds]) {
+      const p = state.players[pid];
+      const availRes = VALID_RESOURCES.find((r) => (state.resourceBank[r] || 0) > 0);
+      if (p && availRes) {
+        p.resources[availRes]++;
+        state.resourceBank[availRes]--;
+      }
+    }
+    state.pendingAqueductPlayerIds = [];
+  }
+  if (state.pendingDisplacedKnight) {
+    const dk = state.pendingDisplacedKnight;
+    const dest = dk.validVertexIds[0];
+    if (dest) {
+      applyAction(state, { type: 'MOVE_DISPLACED_KNIGHT', playerId: dk.playerId, toVertexId: dest }, true);
+    } else {
+      state.pendingDisplacedKnight = null;
+    }
+  }
+  if (state.pendingProgressDiscardPlayerIds && state.pendingProgressDiscardPlayerIds.length > 0) {
+    for (const pid of [...state.pendingProgressDiscardPlayerIds]) {
+      const p = state.players[pid];
+      while (p && p.progressCards.length > 4) {
+        const d = p.progressCards.pop()!;
+        state.progressDecks?.[d.discipline].push(d);
+      }
+    }
+    state.pendingProgressDiscardPlayerIds = [];
+  }
+  if (state.pendingGuildDues) {
+    const inspector = state.players[state.pendingGuildDues.playerId];
+    const targetP = state.players[state.pendingGuildDues.targetPlayerId];
+    if (inspector && targetP) {
+      let taken = 0;
+      for (const t of VALID_TRADEABLES) {
+        while (taken < 2 && getPlayerCardSupply(targetP, t) > 0) {
+          adjustPlayerCardSupply(targetP, t, -1);
+          adjustPlayerCardSupply(inspector, t, 1);
+          taken++;
+        }
+      }
+    }
+    state.pendingGuildDues = null;
+  }
+  if (state.pendingEspionage) {
+    const inspector = state.players[state.pendingEspionage.playerId];
+    const targetP = state.players[state.pendingEspionage.targetPlayerId];
+    if (inspector && targetP && targetP.progressCards.length > 0) {
+      const stolen = targetP.progressCards.pop()!;
+      inspector.progressCards.push(stolen);
+    }
+    state.pendingEspionage = null;
+  }
+  if (state.pendingDeserter) {
+    const des = state.pendingDeserter;
+    if (des.stage === 'choose_victim_knight') {
+      const victimKnight = Object.values(state.board.knights || {}).find(
+        (k) => k.playerId === des.targetPlayerId,
+      );
+      if (victimKnight) {
+        applyAction(
+          state,
+          { type: 'CHOOSE_DESERTER_KNIGHT', playerId: des.targetPlayerId, vertexId: victimKnight.vertexId },
+          true,
+        );
+      } else {
+        state.pendingDeserter = null;
+      }
+    }
+    if (state.pendingDeserter && state.pendingDeserter.stage === 'place_new_knight') {
+      const reqId = state.pendingDeserter.requesterId;
+      const validV = Object.keys(state.board.vertices).find((vid) =>
+        isValidKnightRecruitVertex(state, reqId, vid),
+      );
+      if (validV) {
+        applyAction(state, { type: 'PLACE_DESERTER_KNIGHT', playerId: reqId, vertexId: validV }, true);
+      } else {
+        state.pendingDeserter = null;
+      }
+    }
+  }
+  if (state.pendingWeddingPlayerIds && state.pendingWeddingPlayerIds.length > 0) {
+    const recipient = state.players[state.weddingRequesterId || state.currentTurnPlayerId];
+    for (const pid of [...state.pendingWeddingPlayerIds]) {
+      const giver = state.players[pid];
+      if (!giver || !recipient) continue;
+      let given = 0;
+      for (const t of VALID_TRADEABLES) {
+        while (given < 2 && getPlayerCardSupply(giver, t) > 0) {
+          adjustPlayerCardSupply(giver, t, -1);
+          adjustPlayerCardSupply(recipient, t, 1);
+          given++;
+        }
+      }
+    }
+    state.pendingWeddingPlayerIds = [];
+    state.weddingRequesterId = null;
+  }
+  if (state.pendingCommercialHarbor && state.pendingCommercialHarbor.length > 0) {
+    for (const offer of [...state.pendingCommercialHarbor]) {
+      const responder = state.players[offer.targetPlayerId];
+      const requester = state.players[offer.fromPlayerId];
+      if (!responder || !requester) continue;
+      const comm = VALID_COMMODITIES.find((c) => (responder.commodities[c] || 0) > 0);
+      if (comm) {
+        responder.commodities[comm]--;
+        requester.commodities[comm] = (requester.commodities[comm] || 0) + 1;
+      }
+    }
+    state.pendingCommercialHarbor = [];
+  }
+  syncPlayerVPs(state);
+}
+
 // Auto-roller / Auto-pass handler when turn timer expires
 export function handleTurnTimeout(state: GameState): boolean {
   if (state.phase === 'GAME_OVER' || state.phase === 'LOBBY') return false;
   if (!state.turnDeadlineMs || Date.now() < state.turnDeadlineMs) return false;
+
+  const hadPendingCKPrompt = hasAnyPendingCKPrompts(state);
+  autoResolvePendingCKPrompts(state);
+
+  if (
+    hadPendingCKPrompt &&
+    (state.phase === 'ACTION_PHASE' || state.phase === 'PAIRED_ACTION_PHASE')
+  ) {
+    resumeNormalTurnTimer(state);
+    return true;
+  }
 
   switch (state.phase) {
     case 'SETUP_ROUND_1':
@@ -1492,14 +3549,20 @@ export function handleTurnTimeout(state: GameState): boolean {
     }
 
     case 'DISCARD_PHASE': {
+      const isCK = state.settings.expansion === 'cities_and_knights';
       for (const [pid, needed] of Object.entries(state.pendingDiscards)) {
         const p = state.players[pid];
         if (!p || needed <= 0) continue;
-        const pool: ResourceType[] = [];
+        const pool: TradeableCardType[] = [];
         for (const [res, count] of Object.entries(p.resources) as Array<[ResourceType, number]>) {
           for (let i = 0; i < count; i++) pool.push(res);
         }
-        const toDiscard: Partial<ResourceCount> = {};
+        if (isCK && p.commodities) {
+          for (const [comm, count] of Object.entries(p.commodities) as Array<[CommodityType, number]>) {
+            for (let i = 0; i < count; i++) pool.push(comm);
+          }
+        }
+        const toDiscard: TradePayload = {};
         for (let i = 0; i < needed && pool.length > 0; i++) {
           const idx = cryptoRandomInt(pool.length);
           const chosen = pool.splice(idx, 1)[0];
@@ -1512,11 +3575,17 @@ export function handleTurnTimeout(state: GameState): boolean {
 
     case 'ROBBER_PLACEMENT': {
       const controllerId = state.robberControllerPlayerId || state.currentTurnPlayerId;
-      const candidateHexes = Object.keys(state.board.hexes).filter(
-        (hid) => hid !== state.board.robberHexId && state.board.hexes[hid].terrain !== 'desert',
+      const validNonDesertHexes = Object.keys(state.board.hexes).filter(
+        (hid) =>
+          state.board.hexes[hid].terrain !== 'desert' &&
+          isValidRobberHex(state, hid, controllerId),
+      );
+      const validAnyHexes = Object.keys(state.board.hexes).filter((hid) =>
+        isValidRobberHex(state, hid, controllerId),
       );
       const chosenHex =
-        candidateHexes[cryptoRandomInt(candidateHexes.length)] ||
+        validNonDesertHexes[cryptoRandomInt(validNonDesertHexes.length)] ||
+        validAnyHexes[cryptoRandomInt(validAnyHexes.length)] ||
         Object.keys(state.board.hexes).find((hid) => hid !== state.board.robberHexId)!;
       applyAction(
         state,
@@ -1575,15 +3644,20 @@ export function handleTurnTimeout(state: GameState): boolean {
 }
 
 function stealRandomCard(stealer: any, victim: any, state: GameState) {
-  const cards: ResourceType[] = [];
+  const cards: TradeableCardType[] = [];
   for (const [res, count] of Object.entries(victim.resources) as Array<[ResourceType, number]>) {
     for (let i = 0; i < count; i++) cards.push(res);
+  }
+  if (victim.commodities) {
+    for (const [comm, count] of Object.entries(victim.commodities) as Array<[CommodityType, number]>) {
+      for (let i = 0; i < count; i++) cards.push(comm);
+    }
   }
   if (cards.length === 0) return;
 
   const chosen = cards[cryptoRandomInt(cards.length)];
-  victim.resources[chosen]--;
-  stealer.resources[chosen] = (stealer.resources[chosen] || 0) + 1;
+  adjustPlayerCardSupply(victim, chosen, -1);
+  adjustPlayerCardSupply(stealer, chosen, 1);
 
   state.actionLog.push({
     id: `log_${Date.now()}_${Math.random()}`,
@@ -1597,15 +3671,15 @@ function stealRandomCard(stealer: any, victim: any, state: GameState) {
 function executeTrade(
   p1: any,
   p2: any,
-  p1Gives: Partial<ResourceCount>,
-  p2Gives: Partial<ResourceCount>,
+  p1Gives: TradePayload,
+  p2Gives: TradePayload,
   state: GameState,
 ) {
-  p1.resources = deductCost(p1.resources, p1Gives);
-  p1.resources = addResources(p1.resources, p2Gives);
+  deductTradePayloadFromPlayer(p1, p1Gives);
+  addTradePayloadToPlayer(p1, p2Gives);
 
-  p2.resources = deductCost(p2.resources, p2Gives);
-  p2.resources = addResources(p2.resources, p1Gives);
+  deductTradePayloadFromPlayer(p2, p2Gives);
+  addTradePayloadToPlayer(p2, p1Gives);
 
   state.actionLog.push({
     id: `log_${Date.now()}_${Math.random()}`,
@@ -1617,9 +3691,15 @@ function executeTrade(
   syncPlayerVPs(state);
 }
 
-export function getPlayerMaritimeRatio(playerId: string, resource: ResourceType, board: BoardState): number {
+export function getPlayerMaritimeRatio(
+  playerId: string,
+  item: TradeableCardType,
+  board: BoardState,
+  state?: GameState,
+): number {
   let best = 4;
 
+  // Check 3:1 generic and 2:1 resource harbors
   for (const harbor of Object.values(board.harbors)) {
     const touchesPlayer =
       (board.buildings[harbor.vertexIds[0]] && board.buildings[harbor.vertexIds[0]].playerId === playerId) ||
@@ -1629,9 +3709,29 @@ export function getPlayerMaritimeRatio(playerId: string, resource: ResourceType,
       if (harbor.type === 'generic_3_1' && best > 3) {
         best = 3;
       }
-      if (harbor.resource === resource && harbor.ratio === 2) {
+      if (harbor.resource === item && harbor.ratio === 2) {
         best = 2;
       }
+    }
+  }
+
+  // Cities & Knights special 2:1 rates:
+  if (state && state.settings.expansion === 'cities_and_knights') {
+    const player = state.players[playerId];
+    // 1. Trade Level 3 (Trading House): trade any 2 identical commodities for any 1 resource or commodity
+    if (isValidCommodityType(item) && (player?.cityImprovements?.trade || 0) >= 3) {
+      best = 2;
+    }
+    // 2. Merchant: 2:1 on the resource of the hex where the Merchant is placed
+    if (state.merchant?.ownerId === playerId && state.merchant.resource === item) {
+      best = 2;
+    }
+    // 3. Merchant Fleet progress card: 2:1 on chosen resource or commodity for the rest of this turn
+    if (
+      (state.currentTurnPlayerId === playerId || state.pairedPlayerId === playerId) &&
+      state.merchantFleetTypes?.includes(item)
+    ) {
+      best = 2;
     }
   }
 
@@ -1639,9 +3739,8 @@ export function getPlayerMaritimeRatio(playerId: string, resource: ResourceType,
 }
 
 /**
- * Removes a player mid-game, returning all of their resources, development cards (unplayed and played),
- * settlements, cities, and roads back to the bank/deck and continuing the match seamlessly as if they
- * were never playing.
+ * Removes a player mid-game, returning all of their resources, commodities, development/progress cards,
+ * settlements, cities, knights, and roads back to the bank/deck and continuing the match seamlessly.
  */
 export function removePlayerFromGame(
   state: GameState,
@@ -1660,7 +3759,7 @@ export function removePlayerFromGame(
   const kickedOrderIdx = orderedBefore.indexOf(targetPlayerId);
   const kickedName = target.name;
 
-  // 1. Return all resources held by the player back to the resourceBank
+  // 1. Return all resources and commodities held by the player back to the bank
   for (const res of VALID_RESOURCES) {
     const amt = target.resources[res] || 0;
     if (amt > 0) {
@@ -1668,8 +3767,17 @@ export function removePlayerFromGame(
     }
     target.resources[res] = 0;
   }
+  if (target.commodities && state.commodityBank) {
+    for (const comm of VALID_COMMODITIES) {
+      const amt = target.commodities[comm] || 0;
+      if (amt > 0) {
+        state.commodityBank[comm] = (state.commodityBank[comm] || 0) + amt;
+      }
+      target.commodities[comm] = 0;
+    }
+  }
 
-  // 2. Return all unplayed and played Development Cards back into devCardDeck and reshuffle
+  // 2. Return all unplayed and played Development Cards & Progress Cards back into their decks
   const returnedDevCards = [
     ...(target.devCards || []),
     ...(target.playedDevCards || []),
@@ -1685,7 +3793,22 @@ export function removePlayerFromGame(
   target.devCards = [];
   target.playedDevCards = [];
 
-  // 3. Remove all settlements, cities, and roads owned by the kicked player from the board
+  if (state.progressDecks) {
+    const returnedProgress = [
+      ...(target.progressCards || []),
+      ...(target.playedProgressCards || []),
+    ];
+    for (const pc of returnedProgress) {
+      state.progressDecks[pc.discipline].push(pc);
+    }
+    state.progressDecks.trade = shuffle(state.progressDecks.trade);
+    state.progressDecks.politics = shuffle(state.progressDecks.politics);
+    state.progressDecks.science = shuffle(state.progressDecks.science);
+  }
+  target.progressCards = [];
+  target.playedProgressCards = [];
+
+  // 3. Remove all settlements, cities, roads, knights, metropolises, and merchant owned by the kicked player
   for (const [vid, building] of Object.entries(state.board.buildings)) {
     if (building.playerId === targetPlayerId) {
       delete state.board.buildings[vid];
@@ -1695,6 +3818,23 @@ export function removePlayerFromGame(
     if (road.playerId === targetPlayerId) {
       delete state.board.roads[eid];
     }
+  }
+  if (state.board.knights) {
+    for (const [vid, knight] of Object.entries(state.board.knights)) {
+      if (knight.playerId === targetPlayerId) {
+        delete state.board.knights[vid];
+      }
+    }
+  }
+  if (state.metropolises) {
+    for (const disc of ['trade', 'politics', 'science'] as ProgressCardDiscipline[]) {
+      if (state.metropolises[disc].ownerId === targetPlayerId) {
+        state.metropolises[disc] = { ownerId: null, vertexId: null, level: 0 };
+      }
+    }
+  }
+  if (state.merchant?.ownerId === targetPlayerId) {
+    state.merchant = { hexId: null, ownerId: null, resource: null };
   }
 
   // 4. Remove player from state.players and state.playerOrder, and re-index seatIndex
@@ -1733,11 +3873,15 @@ export function removePlayerFromGame(
     }
   }
 
-  // 6. Recompute Longest Road across remaining players (removing roads/buildings can change routes)
+  // 6. Recompute Longest Road and Harbor Master across remaining players
   if (state.longestRouteOwnerId === targetPlayerId) {
     state.longestRouteOwnerId = null;
   }
   evaluateAndNotifyLongestRoute(state);
+  if (state.harborMasterOwnerId === targetPlayerId) {
+    state.harborMasterOwnerId = null;
+  }
+  evaluateAndNotifyHarborMaster(state);
 
   // 7. Clean up active trade offers involving the kicked player
   if (state.activeTradeOffer) {
@@ -1759,9 +3903,56 @@ export function removePlayerFromGame(
     }
   }
 
-  // 8. Clean up pending discards & steal targets
+  // 8. Clean up pending discards & C&K prompts
   delete state.pendingDiscards[targetPlayerId];
   state.pendingStealTargets = state.pendingStealTargets.filter((id) => id !== targetPlayerId);
+  if (state.pendingAqueductPlayerIds) {
+    state.pendingAqueductPlayerIds = state.pendingAqueductPlayerIds.filter((id) => id !== targetPlayerId);
+  }
+  if (state.pendingBarbarianRewardPlayerIds) {
+    state.pendingBarbarianRewardPlayerIds = state.pendingBarbarianRewardPlayerIds.filter(
+      (id) => id !== targetPlayerId,
+    );
+  }
+  if (state.pendingBarbarianPillagePlayerIds) {
+    state.pendingBarbarianPillagePlayerIds = state.pendingBarbarianPillagePlayerIds.filter(
+      (id) => id !== targetPlayerId,
+    );
+  }
+  if (state.pendingProgressDiscardPlayerIds) {
+    state.pendingProgressDiscardPlayerIds = state.pendingProgressDiscardPlayerIds.filter(
+      (id) => id !== targetPlayerId,
+    );
+  }
+  if (state.pendingWeddingPlayerIds) {
+    state.pendingWeddingPlayerIds = state.pendingWeddingPlayerIds.filter((id) => id !== targetPlayerId);
+  }
+  if (state.pendingCommercialHarbor) {
+    state.pendingCommercialHarbor = state.pendingCommercialHarbor.filter(
+      (o) => o.fromPlayerId !== targetPlayerId && o.targetPlayerId !== targetPlayerId,
+    );
+  }
+  if (state.pendingDisplacedKnight?.playerId === targetPlayerId) {
+    state.pendingDisplacedKnight = null;
+  }
+  if (
+    state.pendingDeserter?.requesterId === targetPlayerId ||
+    state.pendingDeserter?.targetPlayerId === targetPlayerId
+  ) {
+    state.pendingDeserter = null;
+  }
+  if (
+    state.pendingGuildDues?.playerId === targetPlayerId ||
+    state.pendingGuildDues?.targetPlayerId === targetPlayerId
+  ) {
+    state.pendingGuildDues = null;
+  }
+  if (
+    state.pendingEspionage?.playerId === targetPlayerId ||
+    state.pendingEspionage?.targetPlayerId === targetPlayerId
+  ) {
+    state.pendingEspionage = null;
+  }
 
   // 9. Adjust Setup Turn Order or Active Turn Progression
   if (state.phase === 'SETUP_ROUND_1' || state.phase === 'SETUP_ROUND_2') {
@@ -1780,7 +3971,6 @@ export function removePlayerFromGame(
     }
 
     if (state.setupTurnIndex >= state.setupTurnOrder.length) {
-      // Setup rounds finished; start Turn 1
       state.phase = 'TURN_START';
       state.currentTurnPlayerId = state.playerOrder[0];
       state.pairedPlayerId = state.settings.pairedPlayersTurn
@@ -1798,7 +3988,6 @@ export function removePlayerFromGame(
       }
     }
   } else if (state.phase !== 'GAME_OVER') {
-    // Non-setup phases
     const wasCurrentTurnPlayer = state.currentTurnPlayerId === targetPlayerId;
     const wasPairedTurnPlayer =
       state.phase === 'PAIRED_ACTION_PHASE' && state.pairedPlayerId === targetPlayerId;
@@ -1845,9 +4034,19 @@ export function removePlayerFromGame(
       }
 
       if (state.phase === 'DISCARD_PHASE' && Object.keys(state.pendingDiscards).length === 0) {
-        state.phase = 'ROBBER_PLACEMENT';
-        state.robberControllerPlayerId = state.currentTurnPlayerId;
-        refreshTurnTimer(state);
+        if (state.postDiscardPhase) {
+          state.phase = state.postDiscardPhase;
+          state.postDiscardPhase = null;
+          resumeNormalTurnTimer(state);
+        } else if (state.settings.expansion === 'cities_and_knights' && !state.robberActive) {
+          state.phase = 'ACTION_PHASE';
+          state.robberControllerPlayerId = null;
+          refreshTurnTimer(state);
+        } else {
+          state.phase = 'ROBBER_PLACEMENT';
+          state.robberControllerPlayerId = state.currentTurnPlayerId;
+          refreshTurnTimer(state);
+        }
       } else if (
         (state.phase === 'ROBBER_PLACEMENT' || state.phase === 'ROBBER_STEAL') &&
         wasRobberController
@@ -1873,7 +4072,7 @@ export function removePlayerFromGame(
   state.actionLog.push({
     id: `log_${Date.now()}_${Math.random()}`,
     timestamp: Date.now(),
-    message: `🚫 ${kickedName} was removed by the host. Their resources, development cards, and pieces were returned to the bank.`,
+    message: `🚫 ${kickedName} was removed by the host. Their cards and pieces were returned to the bank.`,
     category: 'system',
   });
 

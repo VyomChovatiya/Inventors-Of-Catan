@@ -4,6 +4,7 @@ export * from './coordinates/vertex.js';
 export * from './coordinates/edge.js';
 export * from './board/generator.js';
 export * from './rules/costs.js';
+export * from './rules/citiesAndKnights.js';
 export * from './rules/longestRoute.js';
 export * from './rules/engine.js';
 export * from './rules/actions.js';

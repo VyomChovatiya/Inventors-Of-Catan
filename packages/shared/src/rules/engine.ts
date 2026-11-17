@@ -1,18 +1,32 @@
 import {
   BoardState,
   DevCard,
+  ExpansionType,
   GamePhase,
   GameState,
   HouseRules,
   PlayerColor,
   PlayerPrivateState,
   PlayerPublicState,
+  ProgressCardDiscipline,
   RedactedGameState,
   ResourceCount,
   TimerSettings,
 } from '../types/index.js';
-import { cryptoRandomInt, generateBoard, hasAdjacentRedNumbers, shuffle } from '../board/generator.js';
-import { MAX_PIECES } from './costs.js';
+import {
+  cryptoRandomInt,
+  generateBoard,
+  hasAdjacentRedNumbers,
+  hasInvalidHarborAdjacency,
+  shuffle,
+} from '../board/generator.js';
+import { MAX_PIECES, sumCommodities } from './costs.js';
+import {
+  INITIAL_COMMODITY_BANK,
+  INITIAL_COMMODITY_BANK_5_6,
+  createInitialMetropolises,
+  createProgressDecks,
+} from './citiesAndKnights.js';
 
 export const INITIAL_BANK: ResourceCount = {
   wood: 19,
@@ -34,6 +48,11 @@ export const DEFAULT_HOUSE_RULES: HouseRules = {
   balancedDice: false,
   hiddenBank: false,
   freeTrades: false,
+  friendlyRobber: false,
+  noEarly7s: false,
+  combined2And12: false,
+  playDevCardSameTurn: false,
+  harborMaster: false,
 };
 
 export const DEFAULT_TIMER_SETTINGS: TimerSettings = {
@@ -47,7 +66,7 @@ export const DEFAULT_TIMER_SETTINGS: TimerSettings = {
 export const PHASE_DURATIONS_MS: Record<GamePhase, number> = {
   LOBBY: 0,
   SETUP_ROUND_1: 45_000, // 45s to place settlement + road
-  SETUP_ROUND_2: 45_000, // 45s to place 2nd settlement + road
+  SETUP_ROUND_2: 45_000, // 45s to place 2nd settlement/city + road
   TURN_START: 15_000, // 15s to roll dice (auto-rolls on timeout)
   DISCARD_PHASE: 25_000, // 25s to discard on 7 (auto-discards on timeout)
   ROBBER_PLACEMENT: 25_000, // 25s to move robber (auto-moves on timeout)
@@ -111,8 +130,31 @@ export function drawBalancedDiceRoll(state: GameState): [number, number] {
   return pair;
 }
 
+export function getNormalTurnDurationMs(state: GameState): number {
+  const s = state.settings;
+  if (state.phase === 'PAIRED_ACTION_PHASE') {
+    return (
+      Math.max(
+        15,
+        Math.round((s.turnTimeoutSeconds || DEFAULT_TIMER_SETTINGS.turnTimeoutSeconds) * 0.5),
+      ) * 1000
+    );
+  }
+  return (s.turnTimeoutSeconds || DEFAULT_TIMER_SETTINGS.turnTimeoutSeconds) * 1000;
+}
+
 export function getPhaseDurationMs(state: GameState): number {
   const s = state.settings;
+  const hasPendingCKPrompt =
+    Boolean(state.pendingDisplacedKnight) ||
+    Boolean(state.pendingDeserter) ||
+    Boolean(state.pendingGuildDues) ||
+    Boolean(state.pendingEspionage) ||
+    (state.pendingWeddingPlayerIds?.length || 0) > 0 ||
+    (state.pendingCommercialHarbor?.length || 0) > 0 ||
+    (state.pendingAqueductPlayerIds?.length || 0) > 0 ||
+    (state.pendingBarbarianRewardPlayerIds?.length || 0) > 0 ||
+    (state.pendingBarbarianPillagePlayerIds?.length || 0) > 0;
   switch (state.phase) {
     case 'SETUP_ROUND_1':
     case 'SETUP_ROUND_2':
@@ -124,20 +166,11 @@ export function getPhaseDurationMs(state: GameState): number {
     case 'ROBBER_STEAL':
       return (s.robberTimeoutSeconds || DEFAULT_TIMER_SETTINGS.robberTimeoutSeconds) * 1000;
     case 'ACTION_PHASE':
-      if (state.freeRoadsRemaining > 0) {
-        return (s.robberTimeoutSeconds || DEFAULT_TIMER_SETTINGS.robberTimeoutSeconds) * 1000;
-      }
-      return (s.turnTimeoutSeconds || DEFAULT_TIMER_SETTINGS.turnTimeoutSeconds) * 1000;
     case 'PAIRED_ACTION_PHASE':
-      if (state.freeRoadsRemaining > 0) {
+      if (state.freeRoadsRemaining > 0 || hasPendingCKPrompt) {
         return (s.robberTimeoutSeconds || DEFAULT_TIMER_SETTINGS.robberTimeoutSeconds) * 1000;
       }
-      return (
-        Math.max(
-          15,
-          Math.round((s.turnTimeoutSeconds || DEFAULT_TIMER_SETTINGS.turnTimeoutSeconds) * 0.5),
-        ) * 1000
-      );
+      return getNormalTurnDurationMs(state);
     default:
       return 0;
   }
@@ -152,13 +185,34 @@ export function refreshTurnTimer(state: GameState, customDurationMs?: number) {
 export function pauseNormalTurnTimer(state: GameState) {
   if (
     (state.phase === 'ACTION_PHASE' || state.phase === 'PAIRED_ACTION_PHASE' || state.phase === 'TURN_START') &&
-    state.turnDeadlineMs
+    state.turnDeadlineMs &&
+    !state.savedActionRemainingMs
   ) {
     state.savedActionRemainingMs = Math.max(5_000, state.turnDeadlineMs - Date.now());
   }
 }
 
 export function resumeNormalTurnTimer(state: GameState) {
+  const hasPendingCKPrompt =
+    Boolean(state.pendingDisplacedKnight) ||
+    Boolean(state.pendingDeserter) ||
+    Boolean(state.pendingGuildDues) ||
+    Boolean(state.pendingEspionage) ||
+    (state.pendingWeddingPlayerIds?.length || 0) > 0 ||
+    (state.pendingCommercialHarbor?.length || 0) > 0 ||
+    (state.pendingAqueductPlayerIds?.length || 0) > 0 ||
+    (state.pendingBarbarianRewardPlayerIds?.length || 0) > 0 ||
+    (state.pendingBarbarianPillagePlayerIds?.length || 0) > 0;
+
+  if (
+    (state.phase === 'ACTION_PHASE' || state.phase === 'PAIRED_ACTION_PHASE') &&
+    (state.freeRoadsRemaining > 0 || hasPendingCKPrompt)
+  ) {
+    // Still resolving a sub-prompt or free road placement; start the prompt timer while preserving savedActionRemainingMs
+    refreshTurnTimer(state);
+    return;
+  }
+
   if (state.savedActionRemainingMs && state.savedActionRemainingMs > 0) {
     const fullDuration = getPhaseDurationMs(state);
     state.phaseDurationMs = Math.max(fullDuration, state.savedActionRemainingMs);
@@ -217,16 +271,32 @@ export function createInitialPlayer(
     longestRouteLength: 0,
     hasLongestRoute: false,
     hasLargestArmy: false,
+    harborPoints: 0,
+    hasHarborMaster: false,
     roadsLeft: MAX_PIECES.roads,
     settlementsLeft: MAX_PIECES.settlements,
     citiesLeft: MAX_PIECES.cities,
+    cityWallsLeft: MAX_PIECES.cityWalls,
+    basicKnightsLeft: MAX_PIECES.basicKnights,
+    strongKnightsLeft: MAX_PIECES.strongKnights,
+    mightyKnightsLeft: MAX_PIECES.mightyKnights,
+    cityImprovements: { trade: 0, politics: 0, science: 0 },
+    defenderPoints: 0,
+    progressVictoryPoints: 0,
+    hasMerchant: false,
+    metropolises: [],
+    progressCardCount: 0,
+    playedProgressCards: [],
     resources: { wood: 0, brick: 0, wheat: 0, sheep: 0, ore: 0 },
+    commodities: { cloth: 0, coin: 0, paper: 0 },
     devCards: [],
     playedDevCards: [],
+    progressCards: [],
   };
 }
 
 export interface InitializeGameOptions {
+  expansion?: ExpansionType;
   houseRules?: Partial<HouseRules>;
   customBoard?: BoardState | null;
   randomizeTurnOrder?: boolean;
@@ -236,10 +306,12 @@ export function initializeGame(
   gameId: string,
   playersList: Array<{ id: string; name: string; color: PlayerColor }>,
   is5to6 = false,
-  victoryPointsToWin = 10,
+  victoryPointsToWin?: number,
   timerSettings?: Partial<TimerSettings>,
   options?: InitializeGameOptions,
 ): GameState {
+  const expansion: ExpansionType = options?.expansion || 'base';
+  const isCK = expansion === 'cities_and_knights';
   const isExpanded = is5to6 || playersList.length > 4;
   const usePairedTurn = isExpanded && playersList.length >= 5;
   const expectedHexCount = isExpanded ? 30 : 19;
@@ -248,7 +320,8 @@ export function initializeGame(
   if (
     options?.customBoard &&
     Object.keys(options.customBoard.hexes || {}).length === expectedHexCount &&
-    !hasAdjacentRedNumbers(options.customBoard.hexes)
+    !hasAdjacentRedNumbers(options.customBoard.hexes) &&
+    !hasInvalidHarborAdjacency(options.customBoard.harbors || {}, options.customBoard.edges)
   ) {
     board = {
       hexes: structuredClone(options.customBoard.hexes),
@@ -258,13 +331,23 @@ export function initializeGame(
       robberHexId: options.customBoard.robberHexId,
       buildings: {},
       roads: {},
+      knights: {},
     };
   } else {
     board = generateBoard(isExpanded);
+    board.knights = {};
   }
 
-  const devCardDeck = createDevCardDeck(isExpanded);
+  // In Cities & Knights, the Robber starts off the island until the first Barbarian Attack
+  if (isCK) {
+    for (const hex of Object.values(board.hexes)) {
+      hex.hasRobber = false;
+    }
+  }
+
+  const devCardDeck = isCK ? [] : createDevCardDeck(isExpanded);
   const resourceBank = isExpanded ? { ...INITIAL_BANK_5_6 } : { ...INITIAL_BANK };
+  const commodityBank = isExpanded ? { ...INITIAL_COMMODITY_BANK_5_6 } : { ...INITIAL_COMMODITY_BANK };
 
   // Randomize player turn order when the match starts (unless explicitly disabled by a deterministic test)
   const shouldRandomize = options?.randomizeTurnOrder ?? true;
@@ -284,7 +367,8 @@ export function initializeGame(
 
   const firstPlayerId = playerOrder[0];
   const pairedPlayerId = usePairedTurn ? getPairedPlayerId(firstPlayerId, playerOrder) : undefined;
-  const clampedVPs = Math.max(3, Math.min(20, victoryPointsToWin || 10));
+  const defaultVPs = isCK ? 13 : 10;
+  const clampedVPs = Math.max(3, Math.min(20, victoryPointsToWin || defaultVPs));
 
   const setupTimeoutSeconds = Math.max(
     15,
@@ -307,6 +391,11 @@ export function initializeGame(
     balancedDice: Boolean(options?.houseRules?.balancedDice),
     hiddenBank: Boolean(options?.houseRules?.hiddenBank),
     freeTrades: Boolean(options?.houseRules?.freeTrades),
+    friendlyRobber: Boolean(options?.houseRules?.friendlyRobber),
+    noEarly7s: Boolean(options?.houseRules?.noEarly7s),
+    combined2And12: Boolean(options?.houseRules?.combined2And12),
+    playDevCardSameTurn: Boolean(options?.houseRules?.playDevCardSameTurn),
+    harborMaster: Boolean(options?.houseRules?.harborMaster),
   };
 
   const diceHistory: Record<number, number> = {
@@ -327,7 +416,7 @@ export function initializeGame(
     id: gameId,
     startedAt: Date.now(),
     settings: {
-      expansion: 'base',
+      expansion,
       maxPlayers: isExpanded ? 6 : 4,
       pairedPlayersTurn: usePairedTurn,
       victoryPointsToWin: clampedVPs,
@@ -347,6 +436,8 @@ export function initializeGame(
     setupTurnIndex: 0,
     lastSetupVertexId: null,
     diceRoll: [1, 1],
+    eventDie: isCK ? 'barbarian' : null,
+    redDie: isCK ? 1 : null,
     balancedDiceDeck: houseRules.balancedDice ? createBalancedDiceDeck() : [],
     diceHistory,
     lastDiceRollAt: null,
@@ -362,17 +453,42 @@ export function initializeGame(
     players,
     devCardDeck,
     resourceBank,
+    commodityBank: isCK ? commodityBank : { cloth: 0, coin: 0, paper: 0 },
     activeTradeOffer: null,
     pendingDiscards: {},
+    postDiscardPhase: null,
     pendingStealTargets: [],
     longestRouteOwnerId: null,
     largestArmyOwnerId: null,
+    harborMasterOwnerId: null,
     winnerId: null,
+    barbarianPosition: 0,
+    barbariansAttackedCount: 0,
+    robberActive: !isCK, // True in base game; false in C&K until first Barbarian Attack
+    metropolises: createInitialMetropolises(),
+    merchant: { hexId: null, ownerId: null, resource: null },
+    progressDecks: isCK ? createProgressDecks() : { trade: [], politics: [], science: [] },
+    pendingAlchemyRoll: null,
+    craneDiscountsRemaining: 0,
+    medicineDiscountsRemaining: 0,
+    freeKnightPromotionsRemaining: 0,
+    merchantFleetTypes: [],
+    pendingAqueductPlayerIds: [],
+    pendingBarbarianRewardPlayerIds: [],
+    pendingBarbarianPillagePlayerIds: [],
+    pendingProgressDiscardPlayerIds: [],
+    pendingDisplacedKnight: null,
+    pendingDeserter: null,
+    pendingGuildDues: null,
+    pendingEspionage: null,
+    pendingWeddingPlayerIds: [],
+    weddingRequesterId: null,
+    pendingCommercialHarbor: [],
     actionLog: [
       {
         id: `log_${Date.now()}`,
         timestamp: Date.now(),
-        message: `Match started! Turn order: ${orderedPlayersList.map((p) => p.name).join(' → ')}. Playing to ${clampedVPs} Victory Points.`,
+        message: `${isCK ? 'Cities & Knights match' : 'Match'} started! Turn order: ${orderedPlayersList.map((p) => p.name).join(' → ')}. Playing to ${clampedVPs} Victory Points.`,
         category: 'system',
       },
     ],
@@ -410,6 +526,7 @@ export function getAdjacentVertices(vertexId: string, board: BoardState): string
 export function satisfiesDistanceRule(vertexId: string, board: BoardState): boolean {
   if (!vertexId || !board.vertices[vertexId]) return false;
   if (board.buildings[vertexId]) return false;
+  if (board.knights?.[vertexId]) return false;
   const adj = getAdjacentVertices(vertexId, board);
   for (const v of adj) {
     if (board.buildings[v]) return false;
@@ -440,12 +557,21 @@ export function isValidRoadEdge(state: GameState, playerId: string, edgeId: stri
 
   const v1Building = state.board.buildings[edge.v1];
   const v2Building = state.board.buildings[edge.v2];
+  const v1Knight = state.board.knights?.[edge.v1];
+  const v2Knight = state.board.knights?.[edge.v2];
+
+  const v1BlockedByOpponent =
+    (v1Building && v1Building.playerId !== playerId) ||
+    (v1Knight && v1Knight.playerId !== playerId);
+  const v2BlockedByOpponent =
+    (v2Building && v2Building.playerId !== playerId) ||
+    (v2Knight && v2Knight.playerId !== playerId);
 
   const v1TouchesOwnBuilding = v1Building && v1Building.playerId === playerId;
   const v2TouchesOwnBuilding = v2Building && v2Building.playerId === playerId;
 
   const v1FriendlyRoad =
-    (!v1Building || v1Building.playerId === playerId) &&
+    !v1BlockedByOpponent &&
     Object.values(state.board.roads).some(
       (r) =>
         r.playerId === playerId &&
@@ -453,7 +579,7 @@ export function isValidRoadEdge(state: GameState, playerId: string, edgeId: stri
     );
 
   const v2FriendlyRoad =
-    (!v2Building || v2Building.playerId === playerId) &&
+    !v2BlockedByOpponent &&
     Object.values(state.board.roads).some(
       (r) =>
         r.playerId === playerId &&
@@ -475,23 +601,194 @@ export function isValidSettlementVertex(state: GameState, playerId: string, vert
   return hasConnectingRoad;
 }
 
-export function computePublicVictoryPoints(player: PlayerPrivateState): number {
-  let vps = 0;
-  const settlementsBuilt = MAX_PIECES.settlements - player.settlementsLeft;
-  vps += settlementsBuilt;
+/**
+ * Friendly Robber validation helper (shared between server engine and client board UI).
+ * When `friendlyRobber` house rule is enabled, the Robber cannot be placed on a resource-producing land hex
+ * adjacent to any opponent at or below starting Victory Points (<= 2 in Base Game, <= 3 in Cities & Knights),
+ * unless no other valid land hex exists.
+ */
+export function isValidRobberHex(
+  state: Pick<GameState, 'board' | 'players' | 'settings'>,
+  hexId: string,
+  moverPlayerId?: string,
+): boolean {
+  const hex = state.board.hexes[hexId];
+  if (!hex || hex.terrain === 'sea' || hexId === state.board.robberHexId) {
+    return false;
+  }
 
-  const citiesBuilt = MAX_PIECES.cities - player.citiesLeft;
-  vps += citiesBuilt * 2;
+  if (!state.settings?.houseRules?.friendlyRobber) {
+    return true;
+  }
+
+  const protectedVpMax = state.settings.expansion === 'cities_and_knights' ? 3 : 2;
+
+  const isHexBlockedByFriendlyRobber = (hId: string): boolean => {
+    const h = state.board.hexes[hId];
+    if (!h || h.terrain === 'desert') return false;
+    for (const v of Object.values(state.board.vertices)) {
+      if (!v.hexCoords.includes(hId)) continue;
+      const b = state.board.buildings[v.id];
+      if (!b || (moverPlayerId && b.playerId === moverPlayerId)) continue;
+      const owner = state.players[b.playerId];
+      if (owner && owner.victoryPoints <= protectedVpMax) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  if (!isHexBlockedByFriendlyRobber(hexId)) {
+    return true;
+  }
+
+  // Fallback: if EVERY candidate land hex is blocked by Friendly Robber, allow any candidate land hex so the game never soft-locks
+  const hasAnyUnblockedCandidate = Object.values(state.board.hexes).some(
+    (h) => h.id !== state.board.robberHexId && h.terrain !== 'sea' && !isHexBlockedByFriendlyRobber(h.id),
+  );
+  return !hasAnyUnblockedCandidate;
+}
+
+/**
+ * Computes Harbor Points for each player on the board:
+ * - Each Settlement on a harbor vertex = 1 Harbor Point
+ * - Each City on a harbor vertex = 2 Harbor Points
+ */
+export function computeHarborPointsByPlayer(board: BoardState, playerIds: string[]): Record<string, number> {
+  const points: Record<string, number> = {};
+  for (const pid of playerIds) {
+    points[pid] = 0;
+  }
+  const harborVertices = new Set<string>();
+  for (const harbor of Object.values(board.harbors || {})) {
+    for (const vid of harbor.vertexIds) {
+      harborVertices.add(vid);
+    }
+  }
+  for (const vid of harborVertices) {
+    const b = board.buildings[vid];
+    if (!b) continue;
+    points[b.playerId] = (points[b.playerId] || 0) + (b.type === 'city' ? 2 : 1);
+  }
+  return points;
+}
+
+/**
+ * Evaluates and updates the Harbor Master (+2 VP) special award when `harborMaster` house rule is active.
+ * - First player to reach >= 3 Harbor Points claims Harbor Master.
+ * - Another player only takes Harbor Master by reaching >= 3 AND strictly exceeding the current owner's Harbor Points.
+ * - If a city is pillaged in C&K (or a player is removed), Harbor Master is re-evaluated (dropped on tie or < 3).
+ */
+export function evaluateAndNotifyHarborMaster(state: GameState) {
+  const orderedIds = getOrderedPlayerIds(state);
+  const pointsByPlayer = computeHarborPointsByPlayer(state.board, orderedIds);
+
+  for (const [pid, p] of Object.entries(state.players)) {
+    p.harborPoints = pointsByPlayer[pid] || 0;
+  }
+
+  if (!state.settings?.houseRules?.harborMaster) {
+    state.harborMasterOwnerId = null;
+    for (const p of Object.values(state.players)) {
+      p.hasHarborMaster = false;
+    }
+    return;
+  }
+
+  const prevOwnerId = state.harborMasterOwnerId || null;
+  let maxPoints = 0;
+  for (const pid of orderedIds) {
+    const pts = pointsByPlayer[pid] || 0;
+    if (pts > maxPoints) {
+      maxPoints = pts;
+    }
+  }
+
+  let newOwnerId: string | null = null;
+  if (maxPoints >= 3) {
+    const topPlayers = orderedIds.filter((pid) => (pointsByPlayer[pid] || 0) === maxPoints);
+    if (prevOwnerId && topPlayers.includes(prevOwnerId)) {
+      newOwnerId = prevOwnerId;
+    } else if (topPlayers.length === 1) {
+      newOwnerId = topPlayers[0];
+    } else {
+      newOwnerId = null;
+    }
+  }
+
+  state.harborMasterOwnerId = newOwnerId;
+  for (const [pid, p] of Object.entries(state.players)) {
+    p.hasHarborMaster = pid === newOwnerId;
+  }
+
+  if (newOwnerId && newOwnerId !== prevOwnerId) {
+    const newOwner = state.players[newOwnerId];
+    const pts = pointsByPlayer[newOwnerId] || 3;
+    if (newOwner) {
+      state.latestAwardEvent = {
+        id: `award_hm_${Date.now()}_${Math.random()}`,
+        timestamp: Date.now(),
+        awardType: 'harbor_master',
+        playerId: newOwner.id,
+        playerName: newOwner.name,
+        playerColor: newOwner.color,
+        metricValue: pts,
+      };
+      state.actionLog.push({
+        id: `log_${Date.now()}_${Math.random()}`,
+        timestamp: Date.now(),
+        playerId: newOwner.id,
+        message: `⚓ ${newOwner.name} claimed Harbor Master (${pts} Harbor Points, +2 VP)!`,
+        category: 'build',
+      });
+    }
+  } else if (!newOwnerId && prevOwnerId) {
+    const oldOwner = state.players[prevOwnerId];
+    if (oldOwner) {
+      state.actionLog.push({
+        id: `log_${Date.now()}_${Math.random()}`,
+        timestamp: Date.now(),
+        playerId: prevOwnerId,
+        message: `⚓ ${oldOwner.name} lost Harbor Master!`,
+        category: 'build',
+      });
+    }
+  }
+}
+
+export function computePublicVictoryPoints(player: PlayerPrivateState, board?: BoardState): number {
+  let vps = 0;
+  if (board) {
+    for (const b of Object.values(board.buildings)) {
+      if (b.playerId === player.id) {
+        vps += b.type === 'city' ? 2 : 1;
+      }
+    }
+  } else {
+    const settlementsBuilt = MAX_PIECES.settlements - player.settlementsLeft;
+    vps += settlementsBuilt;
+    const citiesBuilt = MAX_PIECES.cities - player.citiesLeft;
+    vps += citiesBuilt * 2;
+  }
 
   if (player.hasLongestRoute) vps += 2;
   if (player.hasLargestArmy) vps += 2;
+  if (player.hasHarborMaster) vps += 2;
+
+  // Cities & Knights Victory Points
+  if (Array.isArray(player.metropolises)) {
+    vps += player.metropolises.length * 2;
+  }
+  vps += player.defenderPoints || 0;
+  vps += player.progressVictoryPoints || 0;
+  if (player.hasMerchant) vps += 1;
 
   return vps;
 }
 
-export function computeTotalVictoryPoints(player: PlayerPrivateState): number {
-  let vps = computePublicVictoryPoints(player);
-  for (const card of player.devCards) {
+export function computeTotalVictoryPoints(player: PlayerPrivateState, board?: BoardState): number {
+  let vps = computePublicVictoryPoints(player, board);
+  for (const card of player.devCards || []) {
     if (card.type === 'victory_point') {
       vps += 1;
     }
@@ -502,13 +799,41 @@ export function computeTotalVictoryPoints(player: PlayerPrivateState): number {
 // Official Catan Rule: Victory Point cards remain hidden from other players until
 // a player reaches the winning total on their turn (Player 1 or Paired Player 2).
 export function syncPlayerVPs(state: GameState) {
+  const isCK = state.settings.expansion === 'cities_and_knights';
+
   for (const player of Object.values(state.players)) {
-    const publicVP = computePublicVictoryPoints(player);
-    const totalVP = computeTotalVictoryPoints(player);
+    if (!player.commodities) player.commodities = { cloth: 0, coin: 0, paper: 0 };
+    if (!player.progressCards) player.progressCards = [];
+    if (!player.playedProgressCards) player.playedProgressCards = [];
+    if (!player.cityImprovements) player.cityImprovements = { trade: 0, politics: 0, science: 0 };
+
+    if (isCK) {
+      player.hasMerchant = state.merchant?.ownerId === player.id;
+      const ownedMetros: ProgressCardDiscipline[] = [];
+      if (state.metropolises) {
+        for (const [disc, m] of Object.entries(state.metropolises) as Array<
+          [ProgressCardDiscipline, { ownerId: string | null }]
+        >) {
+          if (m.ownerId === player.id) {
+            ownedMetros.push(disc);
+          }
+        }
+      }
+      player.metropolises = ownedMetros;
+    } else {
+      player.hasMerchant = false;
+      player.metropolises = [];
+    }
+
+    const publicVP = computePublicVictoryPoints(player, state.board);
+    const totalVP = computeTotalVictoryPoints(player, state.board);
     player.victoryPoints = publicVP;
     player.secretVictoryPoints = totalVP;
-    player.cardCount = Object.values(player.resources).reduce((sum, n) => sum + n, 0);
-    player.devCardCount = player.devCards.length;
+    const resCount = Object.values(player.resources).reduce((sum, n) => sum + n, 0);
+    const commCount = sumCommodities(player.commodities);
+    player.cardCount = resCount + commCount;
+    player.progressCardCount = player.progressCards.length;
+    player.devCardCount = isCK ? player.progressCardCount : player.devCards.length;
   }
 
   // Only the active turn player (or Paired Player 2 during PAIRED_ACTION_PHASE) can claim victory!
@@ -549,6 +874,41 @@ export function syncPlayerVPs(state: GameState) {
   }
 }
 
+function buildPublicPlayerState(state: GameState, player: PlayerPrivateState): PlayerPublicState {
+  return {
+    id: player.id,
+    name: player.name,
+    color: player.color,
+    seatIndex: player.seatIndex,
+    isConnected: player.isConnected,
+    victoryPoints: state.phase === 'GAME_OVER' ? player.secretVictoryPoints : player.victoryPoints,
+    cardCount: player.cardCount,
+    devCardCount: player.devCardCount,
+    playedKnightsCount: player.playedKnightsCount,
+    longestRouteLength: player.longestRouteLength,
+    hasLongestRoute: player.hasLongestRoute,
+    hasLargestArmy: player.hasLargestArmy,
+    harborPoints: player.harborPoints || 0,
+    hasHarborMaster: Boolean(player.hasHarborMaster),
+    roadsLeft: player.roadsLeft,
+    settlementsLeft: player.settlementsLeft,
+    citiesLeft: player.citiesLeft,
+    cityWallsLeft: player.cityWallsLeft ?? MAX_PIECES.cityWalls,
+    basicKnightsLeft: player.basicKnightsLeft ?? MAX_PIECES.basicKnights,
+    strongKnightsLeft: player.strongKnightsLeft ?? MAX_PIECES.strongKnights,
+    mightyKnightsLeft: player.mightyKnightsLeft ?? MAX_PIECES.mightyKnights,
+    cityImprovements: player.cityImprovements
+      ? { ...player.cityImprovements }
+      : { trade: 0, politics: 0, science: 0 },
+    defenderPoints: player.defenderPoints || 0,
+    progressVictoryPoints: player.progressVictoryPoints || 0,
+    hasMerchant: Boolean(player.hasMerchant),
+    metropolises: Array.isArray(player.metropolises) ? [...player.metropolises] : [],
+    progressCardCount: player.progressCards?.length || 0,
+    playedProgressCards: (player.playedProgressCards || []).map((c) => ({ ...c })),
+  };
+}
+
 export function redactStateForPlayer(state: GameState, requestingPlayerId: string): RedactedGameState {
   const publicPlayers: Record<string, PlayerPublicState> = {};
   const orderedIds = getOrderedPlayerIds(state);
@@ -556,45 +916,13 @@ export function redactStateForPlayer(state: GameState, requestingPlayerId: strin
   for (const pid of orderedIds) {
     const player = state.players[pid];
     if (!player) continue;
-    publicPlayers[pid] = {
-      id: player.id,
-      name: player.name,
-      color: player.color,
-      seatIndex: player.seatIndex,
-      isConnected: player.isConnected,
-      victoryPoints: state.phase === 'GAME_OVER' ? player.secretVictoryPoints : player.victoryPoints,
-      cardCount: player.cardCount,
-      devCardCount: player.devCardCount,
-      playedKnightsCount: player.playedKnightsCount,
-      longestRouteLength: player.longestRouteLength,
-      hasLongestRoute: player.hasLongestRoute,
-      hasLargestArmy: player.hasLargestArmy,
-      roadsLeft: player.roadsLeft,
-      settlementsLeft: player.settlementsLeft,
-      citiesLeft: player.citiesLeft,
-    };
+    publicPlayers[pid] = buildPublicPlayerState(state, player);
   }
 
   // Fallback for any player key not in playerOrder
   for (const [pid, player] of Object.entries(state.players)) {
     if (!publicPlayers[pid]) {
-      publicPlayers[pid] = {
-        id: player.id,
-        name: player.name,
-        color: player.color,
-        seatIndex: player.seatIndex,
-        isConnected: player.isConnected,
-        victoryPoints: state.phase === 'GAME_OVER' ? player.secretVictoryPoints : player.victoryPoints,
-        cardCount: player.cardCount,
-        devCardCount: player.devCardCount,
-        playedKnightsCount: player.playedKnightsCount,
-        longestRouteLength: player.longestRouteLength,
-        hasLongestRoute: player.hasLongestRoute,
-        hasLargestArmy: player.hasLargestArmy,
-        roadsLeft: player.roadsLeft,
-        settlementsLeft: player.settlementsLeft,
-        citiesLeft: player.citiesLeft,
-      };
+      publicPlayers[pid] = buildPublicPlayerState(state, player);
     }
   }
 
@@ -604,13 +932,43 @@ export function redactStateForPlayer(state: GameState, requestingPlayerId: strin
         ...publicPlayers[requestingPlayerId],
         secretVictoryPoints: rawSelf.secretVictoryPoints,
         resources: { ...rawSelf.resources },
-        devCards: rawSelf.devCards.map((c) => ({ ...c })),
-        playedDevCards: rawSelf.playedDevCards.map((c) => ({ ...c })),
+        commodities: rawSelf.commodities ? { ...rawSelf.commodities } : { cloth: 0, coin: 0, paper: 0 },
+        devCards: (rawSelf.devCards || []).map((c) => ({ ...c })),
+        playedDevCards: (rawSelf.playedDevCards || []).map((c) => ({ ...c })),
+        progressCards: (rawSelf.progressCards || []).map((c) => ({ ...c })),
       }
     : undefined;
 
-  const { devCardDeck, balancedDiceDeck, players: _allPlayers, resourceBank, ...restState } = state;
+  const {
+    devCardDeck,
+    progressDecks,
+    balancedDiceDeck,
+    players: _allPlayers,
+    resourceBank,
+    commodityBank,
+    ...restState
+  } = state;
   const isBankHidden = Boolean(state.settings?.houseRules?.hiddenBank);
+
+  let inspectedTargetHand: RedactedGameState['inspectedTargetHand'] = null;
+  if (state.pendingGuildDues && state.pendingGuildDues.playerId === requestingPlayerId) {
+    const targetP = state.players[state.pendingGuildDues.targetPlayerId];
+    if (targetP) {
+      inspectedTargetHand = {
+        targetPlayerId: targetP.id,
+        resources: { ...targetP.resources },
+        commodities: targetP.commodities ? { ...targetP.commodities } : { cloth: 0, coin: 0, paper: 0 },
+      };
+    }
+  } else if (state.pendingEspionage && state.pendingEspionage.playerId === requestingPlayerId) {
+    const targetP = state.players[state.pendingEspionage.targetPlayerId];
+    if (targetP) {
+      inspectedTargetHand = {
+        targetPlayerId: targetP.id,
+        progressCards: (targetP.progressCards || []).map((c) => ({ ...c })),
+      };
+    }
+  }
 
   return {
     ...restState,
@@ -618,6 +976,19 @@ export function redactStateForPlayer(state: GameState, requestingPlayerId: strin
     players: publicPlayers,
     self,
     devCardDeckCount: devCardDeck.length,
+    progressDeckCounts: progressDecks
+      ? {
+          trade: progressDecks.trade.length,
+          politics: progressDecks.politics.length,
+          science: progressDecks.science.length,
+        }
+      : { trade: 0, politics: 0, science: 0 },
     resourceBank: isBankHidden ? null : { ...resourceBank },
+    commodityBank: isBankHidden
+      ? null
+      : commodityBank
+        ? { ...commodityBank }
+        : { cloth: 0, coin: 0, paper: 0 },
+    inspectedTargetHand,
   };
 }

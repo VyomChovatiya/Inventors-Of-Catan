@@ -4,12 +4,28 @@ import {
   AuthenticatedUser,
   BoardState,
   ChatMessage,
+  ExpansionType,
   GameAction,
   HouseRules,
   PlayerColor,
   RedactedGameState,
   TimerSettings,
 } from '@catan/shared';
+
+export type ActiveBuildMode =
+  | 'none'
+  | 'road'
+  | 'settlement'
+  | 'city'
+  | 'city_wall'
+  | 'knight'
+  | 'move_knight'
+  | 'chase_robber'
+  | 'merchant'
+  | 'taxation'
+  | 'diplomacy'
+  | 'intrigue'
+  | 'invention';
 
 export interface RoomPlayer {
   id: string;
@@ -25,6 +41,7 @@ export interface Room {
   createdAt: number;
   startedAt?: number | null;
   hostPlayerId: string;
+  expansion?: ExpansionType;
   is5to6Player: boolean;
   victoryPointsToWin: number;
   timerSettings?: TimerSettings;
@@ -41,6 +58,7 @@ export interface RoomSummary {
   hostName: string;
   playerCount: number;
   maxPlayers: number;
+  expansion?: ExpansionType;
   is5to6Player: boolean;
   victoryPointsToWin: number;
   houseRules?: HouseRules;
@@ -60,7 +78,9 @@ interface GameStoreState {
   room: Room | null;
   publicRooms: RoomSummary[];
   gameState: RedactedGameState | null;
-  activeBuildMode: 'none' | 'road' | 'settlement' | 'city';
+  activeBuildMode: ActiveBuildMode;
+  selectedKnightVertexId: string | null;
+  activeProgressCardId: string | null;
   errorMessage: string | null;
 
   // Auth & Connection methods
@@ -76,6 +96,7 @@ interface GameStoreState {
     timerSettings: TimerSettings,
     houseRules: HouseRules,
     previewBoard?: BoardState | null,
+    expansion?: ExpansionType,
   ) => Promise<string>;
   joinRoom: (code: string, name: string, color: PlayerColor) => Promise<boolean>;
   kickPlayer: (targetPlayerId: string) => Promise<boolean>;
@@ -91,7 +112,9 @@ interface GameStoreState {
 
   // Game Actions
   sendAction: (action: GameAction) => void;
-  setBuildMode: (mode: 'none' | 'road' | 'settlement' | 'city') => void;
+  setBuildMode: (mode: ActiveBuildMode) => void;
+  setSelectedKnightVertexId: (vertexId: string | null) => void;
+  setActiveProgressCardId: (cardId: string | null) => void;
   clearError: () => void;
 }
 
@@ -118,6 +141,8 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
   publicRooms: [],
   gameState: null,
   activeBuildMode: 'none',
+  selectedKnightVertexId: null,
+  activeProgressCardId: null,
   errorMessage: null,
 
   checkAuth: async () => {
@@ -274,6 +299,7 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
     timerSettings,
     houseRules,
     previewBoard,
+    expansion = 'base',
   ) => {
     const { socket } = get();
     if (!socket) throw new Error('Socket not initialized');
@@ -284,6 +310,7 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
         {
           hostName,
           hostColor,
+          expansion,
           is5to6Player,
           victoryPointsToWin,
           timerSettings,
@@ -530,5 +557,7 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
   },
 
   setBuildMode: (mode) => set({ activeBuildMode: mode }),
+  setSelectedKnightVertexId: (vertexId) => set({ selectedKnightVertexId: vertexId }),
+  setActiveProgressCardId: (cardId) => set({ activeProgressCardId: cardId }),
   clearError: () => set({ errorMessage: null }),
 }));

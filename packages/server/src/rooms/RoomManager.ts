@@ -6,6 +6,7 @@ import {
   ChatMessage,
   DEFAULT_HOUSE_RULES,
   DEFAULT_TIMER_SETTINGS,
+  ExpansionType,
   GameAction,
   GameState,
   HouseRules,
@@ -16,6 +17,7 @@ import {
   generateBoard,
   handleTurnTimeout,
   hasAdjacentRedNumbers,
+  hasInvalidHarborAdjacency,
   initializeGame,
   redactStateForPlayer,
   removePlayerFromGame,
@@ -45,6 +47,7 @@ export interface Room {
   createdAt: number;
   startedAt: number | null;
   hostPlayerId: string;
+  expansion: ExpansionType;
   is5to6Player: boolean;
   victoryPointsToWin: number;
   timerSettings: TimerSettings;
@@ -60,6 +63,7 @@ export interface ClientRoomView {
   createdAt: number;
   startedAt: number | null;
   hostPlayerId: string;
+  expansion: ExpansionType;
   is5to6Player: boolean;
   victoryPointsToWin: number;
   timerSettings: TimerSettings;
@@ -76,6 +80,7 @@ export interface RoomSummary {
   hostName: string;
   playerCount: number;
   maxPlayers: number;
+  expansion: ExpansionType;
   is5to6Player: boolean;
   victoryPointsToWin: number;
   houseRules: HouseRules;
@@ -112,6 +117,9 @@ function isValidCustomBoard(board: unknown, is5to6Player: boolean): board is Boa
   if (hasAdjacentRedNumbers(b.hexes)) {
     return false;
   }
+  if (hasInvalidHarborAdjacency(b.harbors, b.edges)) {
+    return false;
+  }
   return true;
 }
 
@@ -143,7 +151,12 @@ export class RoomManager {
             }
             continue;
           }
-          if (!room.victoryPointsToWin) room.victoryPointsToWin = 10;
+          if (!room.expansion) {
+            room.expansion = room.gameState?.settings?.expansion || 'base';
+          }
+          if (!room.victoryPointsToWin) {
+            room.victoryPointsToWin = room.expansion === 'cities_and_knights' ? 13 : 10;
+          }
           if (!room.timerSettings) {
             room.timerSettings = { ...DEFAULT_TIMER_SETTINGS };
           } else if (!room.timerSettings.turnTimeoutSeconds) {
@@ -151,6 +164,8 @@ export class RoomManager {
           }
           if (!room.houseRules) {
             room.houseRules = { ...DEFAULT_HOUSE_RULES };
+          } else {
+            room.houseRules = { ...DEFAULT_HOUSE_RULES, ...room.houseRules };
           }
           if (!Array.isArray(room.chatMessages)) {
             room.chatMessages = [];
@@ -163,6 +178,11 @@ export class RoomManager {
           if (room.gameState) {
             if (!room.gameState.settings.houseRules) {
               room.gameState.settings.houseRules = { ...room.houseRules };
+            } else {
+              room.gameState.settings.houseRules = {
+                ...DEFAULT_HOUSE_RULES,
+                ...room.gameState.settings.houseRules,
+              };
             }
             if (!Array.isArray(room.gameState.playerOrder) || room.gameState.playerOrder.length === 0) {
               room.gameState.playerOrder = Object.keys(room.gameState.players);
@@ -238,6 +258,7 @@ export class RoomManager {
       createdAt: room.createdAt,
       startedAt: room.startedAt,
       hostPlayerId: room.hostPlayerId,
+      expansion: room.expansion || 'base',
       is5to6Player: room.is5to6Player,
       victoryPointsToWin: room.victoryPointsToWin,
       timerSettings: { ...room.timerSettings },
@@ -273,8 +294,9 @@ export class RoomManager {
         hostName: host ? host.name : 'Settler',
         playerCount: players.length,
         maxPlayers: room.is5to6Player ? 6 : 4,
+        expansion: room.expansion || 'base',
         is5to6Player: room.is5to6Player,
-        victoryPointsToWin: room.victoryPointsToWin || 10,
+        victoryPointsToWin: room.victoryPointsToWin || (room.expansion === 'cities_and_knights' ? 13 : 10),
         houseRules: room.houseRules || { ...DEFAULT_HOUSE_RULES },
         status,
         createdAt: room.createdAt,
@@ -289,15 +311,18 @@ export class RoomManager {
     hostName: string | undefined,
     hostColor: PlayerColor,
     is5to6Player = false,
-    victoryPointsToWin = 10,
+    victoryPointsToWin?: number,
     timerSettings?: Partial<TimerSettings>,
     houseRules?: Partial<HouseRules>,
     customPreviewBoard?: BoardState | null,
+    expansion: ExpansionType = 'base',
   ): { room: Room; player: RoomPlayer } {
     const code = Math.random().toString(36).substring(2, 8).toUpperCase();
     const playerId = user.id;
     const cleanName = (hostName || user.name || 'Settler').trim().slice(0, 20) || 'Settler';
     const validColor: PlayerColor = ALL_COLORS.includes(hostColor) ? hostColor : 'red';
+    const validExpansion: ExpansionType =
+      expansion === 'cities_and_knights' ? 'cities_and_knights' : 'base';
 
     const player: RoomPlayer = {
       id: playerId,
@@ -309,7 +334,8 @@ export class RoomManager {
       connected: true,
     };
 
-    const clampedVPs = Math.max(5, Math.min(18, Number(victoryPointsToWin) || 10));
+    const defaultVPs = validExpansion === 'cities_and_knights' ? 13 : 10;
+    const clampedVPs = Math.max(5, Math.min(20, Number(victoryPointsToWin) || defaultVPs));
     const mergedTimers: TimerSettings = {
       setupTimeoutSeconds: Math.max(
         15,
@@ -333,6 +359,11 @@ export class RoomManager {
       balancedDice: Boolean(houseRules?.balancedDice),
       hiddenBank: Boolean(houseRules?.hiddenBank),
       freeTrades: Boolean(houseRules?.freeTrades),
+      friendlyRobber: Boolean(houseRules?.friendlyRobber),
+      noEarly7s: Boolean(houseRules?.noEarly7s),
+      combined2And12: Boolean(houseRules?.combined2And12),
+      playDevCardSameTurn: Boolean(houseRules?.playDevCardSameTurn),
+      harborMaster: Boolean(houseRules?.harborMaster),
     };
 
     const previewBoard = isValidCustomBoard(customPreviewBoard, Boolean(is5to6Player))
@@ -344,6 +375,7 @@ export class RoomManager {
       createdAt: Date.now(),
       startedAt: null,
       hostPlayerId: playerId,
+      expansion: validExpansion,
       is5to6Player: Boolean(is5to6Player),
       victoryPointsToWin: clampedVPs,
       timerSettings: mergedTimers,
@@ -679,9 +711,10 @@ export class RoomManager {
       `gm_${room.code}`,
       playersList,
       room.is5to6Player,
-      room.victoryPointsToWin || 10,
+      room.victoryPointsToWin || (room.expansion === 'cities_and_knights' ? 13 : 10),
       room.timerSettings,
       {
+        expansion: room.expansion || 'base',
         houseRules: room.houseRules,
         customBoard: room.previewBoard,
         randomizeTurnOrder: true,

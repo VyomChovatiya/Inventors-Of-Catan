@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { PlayerColor, HouseRules, BoardState, generateBoard } from '@catan/shared';
+import { PlayerColor, HouseRules, BoardState, ExpansionType, generateBoard } from '@catan/shared';
 import { useGameStore } from '../../store/gameStore.js';
 import { BoardPreview } from '../board/BoardPreview.js';
 import {
@@ -84,8 +84,18 @@ export const Lobby: React.FC = () => {
   const [lobbyNameSaved, setLobbyNameSaved] = useState(false);
 
   const [selectedColor, setSelectedColor] = useState<PlayerColor>('red');
+  const [expansion, setExpansion] = useState<ExpansionType>('base');
   const [is5to6, setIs5to6] = useState(false);
   const [victoryPointsToWin, setVictoryPointsToWin] = useState<number>(10);
+
+  const handleSelectExpansion = (nextExpansion: ExpansionType) => {
+    setExpansion(nextExpansion);
+    if (nextExpansion === 'cities_and_knights' && victoryPointsToWin === 10) {
+      setVictoryPointsToWin(13);
+    } else if (nextExpansion === 'base' && victoryPointsToWin === 13) {
+      setVictoryPointsToWin(10);
+    }
+  };
 
   // Variable timer sliders for the lobby maker (Default normal turn duration: 3 minutes = 180s, max 5 minutes = 300s)
   const [setupTimeoutSeconds, setSetupTimeoutSeconds] = useState<number>(45);
@@ -98,6 +108,11 @@ export const Lobby: React.FC = () => {
     balancedDice: false,
     hiddenBank: false,
     freeTrades: false,
+    friendlyRobber: false,
+    noEarly7s: false,
+    combined2And12: false,
+    playDevCardSameTurn: false,
+    harborMaster: false,
   });
 
   // Home-screen Board Preview (This exact board is used when creating the room)
@@ -161,6 +176,7 @@ export const Lobby: React.FC = () => {
       },
       houseRules,
       previewBoard,
+      expansion,
     );
   };
 
@@ -304,6 +320,11 @@ export const Lobby: React.FC = () => {
       balancedDice: false,
       hiddenBank: false,
       freeTrades: false,
+      friendlyRobber: false,
+      noEarly7s: false,
+      combined2And12: false,
+      playDevCardSameTurn: false,
+      harborMaster: false,
     };
 
     return (
@@ -363,15 +384,26 @@ export const Lobby: React.FC = () => {
 
             {/* Mode, VP, Timers & House Rules Badges */}
             <div className="flex flex-col gap-2.5 bg-slate-950 p-4 rounded-2xl border border-slate-800 text-sm">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="font-bold text-slate-400">Format:</span>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-bold text-slate-400">Mode:</span>
+                  <span
+                    className={`px-2.5 py-0.5 rounded-lg text-xs font-black border ${
+                      room.expansion === 'cities_and_knights'
+                        ? 'bg-purple-950/90 border-purple-500 text-purple-200'
+                        : 'bg-sky-950/80 border-sky-700 text-sky-300'
+                    }`}
+                  >
+                    {room.expansion === 'cities_and_knights'
+                      ? '⚔️ Cities & Knights Expansion'
+                      : '🏝️ CATAN Base Game'}
+                  </span>
                   <span className="text-amber-400 font-bold">
-                    {room.is5to6Player ? '5–6 Players (Paired Turn)' : '2–4 Players (Standard)'}
+                    • {room.is5to6Player ? '5–6 Players (Paired Turn)' : '2–4 Players'}
                   </span>
                 </div>
                 <div className="flex items-center gap-1.5 bg-amber-950/80 border border-amber-700/70 px-3 py-1 rounded-xl text-amber-300 font-black">
-                  <Trophy className="w-4 h-4" /> {room.victoryPointsToWin || 10} VP to Win
+                  <Trophy className="w-4 h-4" /> {room.victoryPointsToWin || (room.expansion === 'cities_and_knights' ? 13 : 10)} VP to Win
                 </div>
               </div>
 
@@ -387,7 +419,14 @@ export const Lobby: React.FC = () => {
 
               <div className="flex items-center flex-wrap gap-2 border-t border-slate-800/80 pt-2.5">
                 <span className="text-xs font-semibold text-slate-300 mr-1">Rules:</span>
-                {!hr.balancedDice && !hr.hiddenBank && !hr.freeTrades ? (
+                {!hr.balancedDice &&
+                !hr.hiddenBank &&
+                !hr.freeTrades &&
+                !hr.friendlyRobber &&
+                !hr.noEarly7s &&
+                !hr.combined2And12 &&
+                !hr.playDevCardSameTurn &&
+                !hr.harborMaster ? (
                   <span className="text-xs font-bold bg-slate-800 text-slate-300 px-2.5 py-0.5 rounded-full">
                     Standard Official Rules
                   </span>
@@ -406,6 +445,31 @@ export const Lobby: React.FC = () => {
                     {hr.freeTrades && (
                       <span className="text-xs font-bold bg-emerald-950 text-emerald-300 border border-emerald-700 px-2.5 py-0.5 rounded-full">
                         🎁 Free Trades Allowed
+                      </span>
+                    )}
+                    {hr.friendlyRobber && (
+                      <span className="text-xs font-bold bg-teal-950 text-teal-300 border border-teal-700 px-2.5 py-0.5 rounded-full">
+                        🛡️ Friendly Robber
+                      </span>
+                    )}
+                    {hr.noEarly7s && (
+                      <span className="text-xs font-bold bg-rose-950 text-rose-300 border border-rose-700 px-2.5 py-0.5 rounded-full">
+                        🚫 No Early 7s (2 Rounds)
+                      </span>
+                    )}
+                    {hr.combined2And12 && (
+                      <span className="text-xs font-bold bg-purple-950 text-purple-300 border border-purple-700 px-2.5 py-0.5 rounded-full">
+                        🎲 2 & 12 Combined
+                      </span>
+                    )}
+                    {hr.playDevCardSameTurn && (
+                      <span className="text-xs font-bold bg-cyan-950 text-cyan-300 border border-cyan-700 px-2.5 py-0.5 rounded-full">
+                        ⚡ Play DC Same Turn
+                      </span>
+                    )}
+                    {hr.harborMaster && (
+                      <span className="text-xs font-bold bg-sky-950 text-sky-300 border border-sky-700 px-2.5 py-0.5 rounded-full">
+                        ⚓ Harbor Master (+2 VP)
                       </span>
                     )}
                   </>
@@ -668,6 +732,49 @@ export const Lobby: React.FC = () => {
                 />
               </div>
 
+              {/* Game Mode Selector: Base Game vs. Cities & Knights */}
+              <div className="flex flex-col gap-2 bg-slate-950 p-3.5 rounded-2xl border border-slate-800">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-bold text-white">Game Mode / Expansion</span>
+                  <span className="text-[11px] text-slate-400">Official 6th Edition</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => handleSelectExpansion('base')}
+                    className={`p-3 rounded-xl border text-left transition cursor-pointer flex flex-col gap-0.5 ${
+                      expansion === 'base'
+                        ? 'bg-amber-500/20 border-amber-400 text-white shadow-lg'
+                        : 'bg-slate-900/90 border-slate-800 text-slate-300 hover:border-slate-700'
+                    }`}
+                  >
+                    <span className="text-xs font-black flex items-center gap-1.5">
+                      🏝️ Base Game
+                    </span>
+                    <span className="text-[11px] text-slate-400">
+                      Classic CATAN • 10 VP Default
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleSelectExpansion('cities_and_knights')}
+                    className={`p-3 rounded-xl border text-left transition cursor-pointer flex flex-col gap-0.5 ${
+                      expansion === 'cities_and_knights'
+                        ? 'bg-purple-600/25 border-purple-400 text-white shadow-lg'
+                        : 'bg-slate-900/90 border-slate-800 text-slate-300 hover:border-slate-700'
+                    }`}
+                  >
+                    <span className="text-xs font-black flex items-center gap-1.5 text-purple-200">
+                      ⚔️ Cities & Knights
+                    </span>
+                    <span className="text-[11px] text-slate-400">
+                      Knights, Metropolises & Progress • 13 VP
+                    </span>
+                  </button>
+                </div>
+              </div>
+
               {/* Preferred Color & 5-6P Expansion */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div className="flex flex-col gap-1.5 bg-slate-950 p-3.5 rounded-2xl border border-slate-800">
@@ -821,8 +928,8 @@ export const Lobby: React.FC = () => {
                   <span className="text-xs text-slate-400">Standard rules off by default</span>
                 </div>
 
-                <div className="grid grid-cols-3 gap-2.5">
-                  <label className="flex flex-col justify-between p-2.5 rounded-xl bg-slate-900/90 border border-slate-800 cursor-pointer hover:border-slate-700">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  <label className="flex flex-col justify-between p-2 rounded-xl bg-slate-900/90 border border-slate-800 cursor-pointer hover:border-slate-700">
                     <div className="flex items-center justify-between mb-1">
                       <span className="text-xs font-bold text-indigo-300">Balanced Dice</span>
                       <input
@@ -834,12 +941,12 @@ export const Lobby: React.FC = () => {
                         className="w-4 h-4 accent-indigo-500 cursor-pointer"
                       />
                     </div>
-                    <span className="text-[11px] text-slate-400 leading-tight">
+                    <span className="text-[10px] text-slate-400 leading-tight">
                       36-pair deck without replacement
                     </span>
                   </label>
 
-                  <label className="flex flex-col justify-between p-2.5 rounded-xl bg-slate-900/90 border border-slate-800 cursor-pointer hover:border-slate-700">
+                  <label className="flex flex-col justify-between p-2 rounded-xl bg-slate-900/90 border border-slate-800 cursor-pointer hover:border-slate-700">
                     <div className="flex items-center justify-between mb-1">
                       <span className="text-xs font-bold text-amber-300">Hidden Bank</span>
                       <input
@@ -851,12 +958,12 @@ export const Lobby: React.FC = () => {
                         className="w-4 h-4 accent-amber-500 cursor-pointer"
                       />
                     </div>
-                    <span className="text-[11px] text-slate-400 leading-tight">
+                    <span className="text-[10px] text-slate-400 leading-tight">
                       Hide bank resource card counts
                     </span>
                   </label>
 
-                  <label className="flex flex-col justify-between p-2.5 rounded-xl bg-slate-900/90 border border-slate-800 cursor-pointer hover:border-slate-700">
+                  <label className="flex flex-col justify-between p-2 rounded-xl bg-slate-900/90 border border-slate-800 cursor-pointer hover:border-slate-700">
                     <div className="flex items-center justify-between mb-1">
                       <span className="text-xs font-bold text-emerald-300">Free Trades</span>
                       <input
@@ -868,8 +975,96 @@ export const Lobby: React.FC = () => {
                         className="w-4 h-4 accent-emerald-500 cursor-pointer"
                       />
                     </div>
-                    <span className="text-[11px] text-slate-400 leading-tight">
+                    <span className="text-[10px] text-slate-400 leading-tight">
                       Allow one-sided gift trades
+                    </span>
+                  </label>
+
+                  <label className="flex flex-col justify-between p-2 rounded-xl bg-slate-900/90 border border-slate-800 cursor-pointer hover:border-slate-700">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-xs font-bold text-teal-300">Friendly Robber</span>
+                      <input
+                        type="checkbox"
+                        checked={houseRules.friendlyRobber}
+                        onChange={(e) =>
+                          setHouseRules((prev) => ({ ...prev, friendlyRobber: e.target.checked }))
+                        }
+                        className="w-4 h-4 accent-teal-500 cursor-pointer"
+                      />
+                    </div>
+                    <span className="text-[10px] text-slate-400 leading-tight">
+                      Protect players at starting VPs
+                    </span>
+                  </label>
+
+                  <label className="flex flex-col justify-between p-2 rounded-xl bg-slate-900/90 border border-slate-800 cursor-pointer hover:border-slate-700">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-xs font-bold text-rose-300">No Early 7s</span>
+                      <input
+                        type="checkbox"
+                        checked={houseRules.noEarly7s}
+                        onChange={(e) =>
+                          setHouseRules((prev) => ({ ...prev, noEarly7s: e.target.checked }))
+                        }
+                        className="w-4 h-4 accent-rose-500 cursor-pointer"
+                      />
+                    </div>
+                    <span className="text-[10px] text-slate-400 leading-tight">
+                      Re-roll 7s in first 2 rounds
+                    </span>
+                  </label>
+
+                  <label className="flex flex-col justify-between p-2 rounded-xl bg-slate-900/90 border border-slate-800 cursor-pointer hover:border-slate-700">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-xs font-bold text-purple-300">2 & 12 Combined</span>
+                      <input
+                        type="checkbox"
+                        checked={houseRules.combined2And12}
+                        onChange={(e) =>
+                          setHouseRules((prev) => ({ ...prev, combined2And12: e.target.checked }))
+                        }
+                        className="w-4 h-4 accent-purple-500 cursor-pointer"
+                      />
+                    </div>
+                    <span className="text-[10px] text-slate-400 leading-tight">
+                      Roll 2 or 12 produces both
+                    </span>
+                  </label>
+
+                  <label className="flex flex-col justify-between p-2 rounded-xl bg-slate-900/90 border border-slate-800 cursor-pointer hover:border-slate-700">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-xs font-bold text-cyan-300">Instant DCs</span>
+                      <input
+                        type="checkbox"
+                        checked={houseRules.playDevCardSameTurn}
+                        onChange={(e) =>
+                          setHouseRules((prev) => ({
+                            ...prev,
+                            playDevCardSameTurn: e.target.checked,
+                          }))
+                        }
+                        className="w-4 h-4 accent-cyan-500 cursor-pointer"
+                      />
+                    </div>
+                    <span className="text-[10px] text-slate-400 leading-tight">
+                      Play Dev Card turn bought
+                    </span>
+                  </label>
+
+                  <label className="flex flex-col justify-between p-2 rounded-xl bg-slate-900/90 border border-slate-800 cursor-pointer hover:border-slate-700">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-xs font-bold text-sky-300">Harbor Master</span>
+                      <input
+                        type="checkbox"
+                        checked={houseRules.harborMaster}
+                        onChange={(e) =>
+                          setHouseRules((prev) => ({ ...prev, harborMaster: e.target.checked }))
+                        }
+                        className="w-4 h-4 accent-sky-500 cursor-pointer"
+                      />
+                    </div>
+                    <span className="text-[10px] text-slate-400 leading-tight">
+                      +2 VP for 3+ Harbor Points
                     </span>
                   </label>
                 </div>
@@ -932,28 +1127,62 @@ export const Lobby: React.FC = () => {
                               Host: {r.hostName}
                             </span>
                             <span className="text-[11px] text-slate-400">
+                              {r.expansion === 'cities_and_knights' ? '⚔️ C&K' : '🏝️ Base'} •{' '}
                               {r.playerCount}/{r.maxPlayers} Players • {r.victoryPointsToWin} VP •{' '}
                               {r.is5to6Player ? '5–6P' : '2–4P'}
                             </span>
-                            {hr && (hr.balancedDice || hr.hiddenBank || hr.freeTrades) && (
-                              <div className="flex flex-wrap gap-1 mt-0.5">
-                                {hr.balancedDice && (
-                                  <span className="text-[9px] font-bold bg-indigo-950 text-indigo-300 px-1.5 rounded">
-                                    Balanced Dice
-                                  </span>
-                                )}
-                                {hr.hiddenBank && (
-                                  <span className="text-[9px] font-bold bg-amber-950 text-amber-300 px-1.5 rounded">
-                                    Hidden Bank
-                                  </span>
-                                )}
-                                {hr.freeTrades && (
-                                  <span className="text-[9px] font-bold bg-emerald-950 text-emerald-300 px-1.5 rounded">
-                                    Free Trades
-                                  </span>
-                                )}
-                              </div>
-                            )}
+                            {hr &&
+                              (hr.balancedDice ||
+                                hr.hiddenBank ||
+                                hr.freeTrades ||
+                                hr.friendlyRobber ||
+                                hr.noEarly7s ||
+                                hr.combined2And12 ||
+                                hr.playDevCardSameTurn ||
+                                hr.harborMaster) && (
+                                <div className="flex flex-wrap gap-1 mt-0.5">
+                                  {hr.balancedDice && (
+                                    <span className="text-[9px] font-bold bg-indigo-950 text-indigo-300 px-1.5 rounded">
+                                      Balanced Dice
+                                    </span>
+                                  )}
+                                  {hr.hiddenBank && (
+                                    <span className="text-[9px] font-bold bg-amber-950 text-amber-300 px-1.5 rounded">
+                                      Hidden Bank
+                                    </span>
+                                  )}
+                                  {hr.freeTrades && (
+                                    <span className="text-[9px] font-bold bg-emerald-950 text-emerald-300 px-1.5 rounded">
+                                      Free Trades
+                                    </span>
+                                  )}
+                                  {hr.friendlyRobber && (
+                                    <span className="text-[9px] font-bold bg-teal-950 text-teal-300 px-1.5 rounded">
+                                      Friendly Robber
+                                    </span>
+                                  )}
+                                  {hr.noEarly7s && (
+                                    <span className="text-[9px] font-bold bg-rose-950 text-rose-300 px-1.5 rounded">
+                                      No Early 7s
+                                    </span>
+                                  )}
+                                  {hr.combined2And12 && (
+                                    <span className="text-[9px] font-bold bg-purple-950 text-purple-300 px-1.5 rounded">
+                                      2&12 Combined
+                                    </span>
+                                  )}
+                                  {hr.playDevCardSameTurn && (
+                                    <span className="text-[9px] font-bold bg-cyan-950 text-cyan-300 px-1.5 rounded">
+                                      Instant DCs
+                                    </span>
+                                  )}
+                                  {hr.harborMaster && (
+                                    <span className="text-[9px] font-bold bg-sky-950 text-sky-300 px-1.5 rounded">
+                                      Harbor Master
+                                    </span>
+                                  )}
+                                </div>
+                              )}
                             <span className="text-[11px] text-sky-400 font-semibold flex items-center gap-1 mt-0.5">
                               <Clock className="w-3 h-3" />
                               {r.status === 'in_progress' ? 'Started' : 'Created'} {formatClockTime(timeRef)} (

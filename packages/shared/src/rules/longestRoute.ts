@@ -26,12 +26,13 @@ export function calculatePlayerLongestRoute(playerId: string, board: BoardState)
     adjacency.get(v2)!.push({ edgeId: road.edgeId, nextVertexId: v1 });
   }
 
-  // Check if a vertex is blocked by an opponent building
+  // Check if a vertex is blocked by an opponent building or opponent knight
   function isVertexBlocked(vId: string): boolean {
     const building = board.buildings[vId];
-    if (!building) return false;
-    // Blocked if it belongs to an opponent
-    return building.playerId !== playerId;
+    if (building && building.playerId !== playerId) return true;
+    const knight = board.knights?.[vId];
+    if (knight && knight.playerId !== playerId) return true;
+    return false;
   }
 
   let maxLen = 0;

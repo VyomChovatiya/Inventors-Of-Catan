@@ -114,6 +114,19 @@ export class SessionManager {
   }
 
   public getCallbackUrl(req?: IncomingMessage): string {
+    if (req) {
+      const forwardedHost = (req.headers['x-forwarded-host'] as string)?.split(',')[0]?.trim();
+      const host = forwardedHost || req.headers.host;
+      if (
+        host &&
+        (host.includes('dpdns.org') ||
+          host.includes('ngrok') ||
+          host.includes('trycloudflare.com') ||
+          host.includes('ts.net'))
+      ) {
+        return `https://${host}/api/auth/google/callback`;
+      }
+    }
     if (process.env.GOOGLE_CALLBACK_URL) {
       return process.env.GOOGLE_CALLBACK_URL.trim();
     }
@@ -123,10 +136,12 @@ export class SessionManager {
     if (req && req.headers.host) {
       const proto =
         (req.headers['x-forwarded-proto'] as string)?.split(',')[0]?.trim() ||
-        (req.headers.host.includes('ngrok') ? 'https' : 'http');
+        (req.headers.host.includes('ngrok') || req.headers.host.includes('dpdns.org')
+          ? 'https'
+          : 'http');
       return `${proto}://${req.headers.host}/api/auth/google/callback`;
     }
-    return 'https://flakily-vaseline-catchy.ngrok-free.dev/api/auth/google/callback';
+    return 'https://inventorsofcatan.dpdns.org/api/auth/google/callback';
   }
 
   public signSessionId(sessionId: string): string {

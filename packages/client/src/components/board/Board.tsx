@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   HEX_RADIUS,
   getHexCornerPoints,
@@ -7,6 +7,11 @@ import {
   PlayerColor,
   ResourceType,
   satisfiesDistanceRule,
+  isValidRobberHex,
+  isValidKnightRecruitVertex,
+  getReachableKnightVertices,
+  isOpenRoadEdge,
+  getPlayerVulnerableCityVertices,
 } from '@catan/shared';
 import { useGameStore } from '../../store/gameStore.js';
 
@@ -49,6 +54,15 @@ const NUMBER_PIPS: Record<number, number> = {
   12: 1,
 };
 
+const METROPOLIS_STYLES: Record<
+  'trade' | 'politics' | 'science',
+  { fill: string; stroke: string; badge: string; label: string }
+> = {
+  trade: { fill: '#facc15', stroke: '#854d0e', badge: '🟡', label: 'Trade Metropolis (4 VP)' },
+  politics: { fill: '#38bdf8', stroke: '#1e3a8a', badge: '🔵', label: 'Politics Metropolis (4 VP)' },
+  science: { fill: '#4ade80', stroke: '#14532d', badge: '🟢', label: 'Science Metropolis (4 VP)' },
+};
+
 interface PieceTooltip {
   x: number;
   y: number;
@@ -58,10 +72,28 @@ interface PieceTooltip {
 }
 
 export const Board: React.FC<BoardProps> = React.memo(({ state, myPlayerId }) => {
-  const { sendAction, activeBuildMode, setBuildMode } = useGameStore();
+  const {
+    sendAction,
+    activeBuildMode,
+    setBuildMode,
+    selectedKnightVertexId,
+    setSelectedKnightVertexId,
+    activeProgressCardId,
+    setActiveProgressCardId,
+  } = useGameStore();
+
   const [hoveredVertex, setHoveredVertex] = useState<string | null>(null);
   const [hoveredEdge, setHoveredEdge] = useState<string | null>(null);
   const [hoveredPiece, setHoveredPiece] = useState<PieceTooltip | null>(null);
+  const [inventionFirstHexId, setInventionFirstHexId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (activeBuildMode !== 'invention') {
+      setInventionFirstHexId(null);
+    }
+  }, [activeBuildMode]);
+
+  const isCK = state.settings.expansion === 'cities_and_knights';
 
   const isMyTurn =
     (state.phase === 'ACTION_PHASE' && state.currentTurnPlayerId === myPlayerId) ||
@@ -95,6 +127,43 @@ export const Board: React.FC<BoardProps> = React.memo(({ state, myPlayerId }) =>
     isSetupPlacingRoad || (isMyTurn && (activeBuildMode === 'road' || state.freeRoadsRemaining > 0));
   const isPlacingSettlement = isSetupPlacingSettlement || (isMyTurn && activeBuildMode === 'settlement');
 
+  // Pending C&K interactive board states
+  const isMyDisplacedKnightTurn = Boolean(
+    myPlayerId && state.pendingDisplacedKnight?.playerId === myPlayerId,
+  );
+  const isMyDeserterVictimTurn = Boolean(
+    myPlayerId &&
+      state.pendingDeserter?.targetPlayerId === myPlayerId &&
+      state.pendingDeserter.stage === 'choose_victim_knight',
+  );
+  const isMyDeserterPlaceTurn = Boolean(
+    myPlayerId &&
+      state.pendingDeserter?.requesterId === myPlayerId &&
+      state.pendingDeserter.stage === 'place_new_knight',
+  );
+  const isMyPillageTurn = Boolean(
+    myPlayerId && state.pendingBarbarianPillagePlayerIds?.includes(myPlayerId),
+  );
+  const vulnerableCityVertices = useMemo(() => {
+    if (!isMyPillageTurn || !myPlayerId) return new Set<string>();
+    return new Set(getPlayerVulnerableCityVertices(state.board, myPlayerId));
+  }, [isMyPillageTurn, myPlayerId, state.board]);
+
+  const reachableKnightMove = useMemo(() => {
+    if (!isMyTurn || activeBuildMode !== 'move_knight' || !selectedKnightVertexId || !myPlayerId) {
+      return { emptyVertices: new Set<string>(), displaceableKnightVertices: new Set<string>() };
+    }
+    const k = state.board.knights?.[selectedKnightVertexId];
+    if (!k) {
+      return { emptyVertices: new Set<string>(), displaceableKnightVertices: new Set<string>() };
+    }
+    const res = getReachableKnightVertices(state.board, myPlayerId, selectedKnightVertexId, k.level);
+    return {
+      emptyVertices: new Set(res.emptyVertices),
+      displaceableKnightVertices: new Set(res.displaceableKnightVertices),
+    };
+  }, [isMyTurn, activeBuildMode, selectedKnightVertexId, myPlayerId, state.board]);
+
   // Helper to check if an edge is a legal road build spot for current player
   const isEdgeLegalForRoad = (edgeId: string): boolean => {
     if (!myPlayerId) return false;
@@ -107,12 +176,21 @@ export const Board: React.FC<BoardProps> = React.memo(({ state, myPlayerId }) =>
 
     const v1Building = state.board.buildings[edge.v1];
     const v2Building = state.board.buildings[edge.v2];
+    const v1Knight = state.board.knights?.[edge.v1];
+    const v2Knight = state.board.knights?.[edge.v2];
+
+    const v1BlockedByOpponent =
+      (v1Building && v1Building.playerId !== myPlayerId) ||
+      (v1Knight && v1Knight.playerId !== myPlayerId);
+    const v2BlockedByOpponent =
+      (v2Building && v2Building.playerId !== myPlayerId) ||
+      (v2Knight && v2Knight.playerId !== myPlayerId);
 
     const v1TouchesOwnBuilding = v1Building && v1Building.playerId === myPlayerId;
     const v2TouchesOwnBuilding = v2Building && v2Building.playerId === myPlayerId;
 
     const v1FriendlyRoad =
-      (!v1Building || v1Building.playerId === myPlayerId) &&
+      !v1BlockedByOpponent &&
       Object.values(state.board.roads).some(
         (r) =>
           r.playerId === myPlayerId &&
@@ -120,7 +198,7 @@ export const Board: React.FC<BoardProps> = React.memo(({ state, myPlayerId }) =>
       );
 
     const v2FriendlyRoad =
-      (!v2Building || v2Building.playerId === myPlayerId) &&
+      !v2BlockedByOpponent &&
       Object.values(state.board.roads).some(
         (r) =>
           r.playerId === myPlayerId &&
@@ -143,9 +221,48 @@ export const Board: React.FC<BoardProps> = React.memo(({ state, myPlayerId }) =>
     );
   };
 
+  const isVertexLegalForIntrigue = (vertexId: string): boolean => {
+    if (!myPlayerId) return false;
+    const k = state.board.knights?.[vertexId];
+    if (!k || k.playerId === myPlayerId) return false;
+    return Object.values(state.board.roads).some(
+      (r) =>
+        r.playerId === myPlayerId &&
+        (state.board.edges[r.edgeId]?.v1 === vertexId || state.board.edges[r.edgeId]?.v2 === vertexId),
+    );
+  };
+
   const handleVertexClick = (vId: string) => {
     if (!myPlayerId) return;
 
+    // 1. Barbarian pillage choice
+    if (isMyPillageTurn && vulnerableCityVertices.has(vId)) {
+      sendAction({ type: 'CHOOSE_PILLAGED_CITY', playerId: myPlayerId, vertexId: vId });
+      return;
+    }
+
+    // 2. Displaced knight relocation
+    if (isMyDisplacedKnightTurn && state.pendingDisplacedKnight?.validVertexIds.includes(vId)) {
+      sendAction({ type: 'MOVE_DISPLACED_KNIGHT', playerId: myPlayerId, toVertexId: vId });
+      return;
+    }
+
+    // 3. Deserter victim chooses knight to desert
+    if (isMyDeserterVictimTurn) {
+      const k = state.board.knights?.[vId];
+      if (k && k.playerId === myPlayerId) {
+        sendAction({ type: 'CHOOSE_DESERTER_KNIGHT', playerId: myPlayerId, vertexId: vId });
+        return;
+      }
+    }
+
+    // 4. Deserter chooser places knight
+    if (isMyDeserterPlaceTurn && isValidKnightRecruitVertex(state.board, myPlayerId, vId)) {
+      sendAction({ type: 'PLACE_DESERTER_KNIGHT', playerId: myPlayerId, vertexId: vId });
+      return;
+    }
+
+    // 5. Setup round placement
     if (isSetupPlacingSettlement) {
       sendAction({ type: 'BUILD_SETUP_SETTLEMENT', playerId: myPlayerId, vertexId: vId });
       return;
@@ -155,10 +272,66 @@ export const Board: React.FC<BoardProps> = React.memo(({ state, myPlayerId }) =>
       if (activeBuildMode === 'settlement') {
         sendAction({ type: 'BUILD_SETTLEMENT', playerId: myPlayerId, vertexId: vId });
         setBuildMode('none');
-      } else if (activeBuildMode === 'city') {
+        return;
+      }
+      if (activeBuildMode === 'city') {
         sendAction({ type: 'UPGRADE_CITY', playerId: myPlayerId, vertexId: vId });
         setBuildMode('none');
+        return;
       }
+      if (activeBuildMode === 'city_wall') {
+        if (activeProgressCardId) {
+          sendAction({
+            type: 'PLAY_PROGRESS_CARD',
+            playerId: myPlayerId,
+            cardId: activeProgressCardId,
+            options: { cityVertexId: vId },
+          });
+          setActiveProgressCardId(null);
+        } else {
+          sendAction({ type: 'BUILD_CITY_WALL', playerId: myPlayerId, vertexId: vId });
+        }
+        setBuildMode('none');
+        return;
+      }
+      if (activeBuildMode === 'knight') {
+        sendAction({ type: 'RECRUIT_KNIGHT', playerId: myPlayerId, vertexId: vId });
+        setBuildMode('none');
+        return;
+      }
+      if (activeBuildMode === 'move_knight' && selectedKnightVertexId) {
+        if (
+          reachableKnightMove.emptyVertices.has(vId) ||
+          reachableKnightMove.displaceableKnightVertices.has(vId)
+        ) {
+          sendAction({
+            type: 'MOVE_KNIGHT',
+            playerId: myPlayerId,
+            fromVertexId: selectedKnightVertexId,
+            toVertexId: vId,
+          });
+          setSelectedKnightVertexId(null);
+          setBuildMode('none');
+          return;
+        }
+      }
+      if (activeBuildMode === 'intrigue' && activeProgressCardId && isVertexLegalForIntrigue(vId)) {
+        sendAction({
+          type: 'PLAY_PROGRESS_CARD',
+          playerId: myPlayerId,
+          cardId: activeProgressCardId,
+          options: { knightVertexId: vId },
+        });
+        setActiveProgressCardId(null);
+        setBuildMode('none');
+        return;
+      }
+    }
+
+    // Clicking own knight selects/deselects it for Knight actions in HUD
+    const clickedKnight = state.board.knights?.[vId];
+    if (clickedKnight && clickedKnight.playerId === myPlayerId) {
+      setSelectedKnightVertexId(selectedKnightVertexId === vId ? null : vId);
     }
   };
 
@@ -167,6 +340,20 @@ export const Board: React.FC<BoardProps> = React.memo(({ state, myPlayerId }) =>
 
     if (isSetupPlacingRoad) {
       sendAction({ type: 'BUILD_SETUP_ROAD', playerId: myPlayerId, edgeId });
+      return;
+    }
+
+    if (isMyTurn && activeBuildMode === 'diplomacy' && activeProgressCardId) {
+      if (isOpenRoadEdge(state.board, edgeId)) {
+        sendAction({
+          type: 'PLAY_PROGRESS_CARD',
+          playerId: myPlayerId,
+          cardId: activeProgressCardId,
+          options: { edgeId },
+        });
+        setActiveProgressCardId(null);
+        setBuildMode('none');
+      }
       return;
     }
 
@@ -182,12 +369,95 @@ export const Board: React.FC<BoardProps> = React.memo(({ state, myPlayerId }) =>
     ? state.robberControllerPlayerId === myPlayerId
     : state.currentTurnPlayerId === myPlayerId || state.pairedPlayerId === myPlayerId;
 
+  const isHexLegalForMerchant = (hexId: string): boolean => {
+    if (!myPlayerId) return false;
+    const hex = state.board.hexes[hexId];
+    if (!hex || !['forest', 'hills', 'fields', 'pasture', 'mountains'].includes(hex.terrain)) {
+      return false;
+    }
+    const hexKey = `${hex.q},${hex.r},${hex.s}`;
+    return Object.values(state.board.vertices).some(
+      (v) =>
+        v.hexCoords.includes(hexKey) &&
+        state.board.buildings[v.id]?.playerId === myPlayerId,
+    );
+  };
+
+  const isHexLegalForInvention = (hexId: string): boolean => {
+    const hex = state.board.hexes[hexId];
+    if (!hex || hex.terrain === 'desert' || hex.terrain === 'sea' || !hex.number) return false;
+    return ![2, 6, 8, 12].includes(hex.number);
+  };
+
   const handleHexClick = (hexId: string) => {
     if (!myPlayerId) return;
     if (state.turnDeadlineMs && Date.now() >= state.turnDeadlineMs) return;
+
     const canMoveRobber = state.phase === 'ROBBER_PLACEMENT' && isRobberController;
     if (canMoveRobber) {
       sendAction({ type: 'MOVE_ROBBER', playerId: myPlayerId, hexId });
+      return;
+    }
+
+    if (isMyTurn && activeBuildMode === 'chase_robber' && selectedKnightVertexId) {
+      if (isValidRobberHex(state as any, hexId, myPlayerId)) {
+        sendAction({
+          type: 'CHASE_ROBBER',
+          playerId: myPlayerId,
+          knightVertexId: selectedKnightVertexId,
+          hexId,
+        });
+        setSelectedKnightVertexId(null);
+        setBuildMode('none');
+      }
+      return;
+    }
+
+    if (isMyTurn && activeBuildMode === 'merchant' && activeProgressCardId) {
+      if (isHexLegalForMerchant(hexId)) {
+        sendAction({
+          type: 'PLAY_PROGRESS_CARD',
+          playerId: myPlayerId,
+          cardId: activeProgressCardId,
+          options: { hexId },
+        });
+        setActiveProgressCardId(null);
+        setBuildMode('none');
+      }
+      return;
+    }
+
+    if (isMyTurn && activeBuildMode === 'taxation' && activeProgressCardId) {
+      if (isValidRobberHex(state as any, hexId, myPlayerId)) {
+        sendAction({
+          type: 'PLAY_PROGRESS_CARD',
+          playerId: myPlayerId,
+          cardId: activeProgressCardId,
+          options: { hexId },
+        });
+        setActiveProgressCardId(null);
+        setBuildMode('none');
+      }
+      return;
+    }
+
+    if (isMyTurn && activeBuildMode === 'invention' && activeProgressCardId) {
+      if (!isHexLegalForInvention(hexId)) return;
+      if (!inventionFirstHexId) {
+        setInventionFirstHexId(hexId);
+      } else if (inventionFirstHexId === hexId) {
+        setInventionFirstHexId(null);
+      } else {
+        sendAction({
+          type: 'PLAY_PROGRESS_CARD',
+          playerId: myPlayerId,
+          cardId: activeProgressCardId,
+          options: { swapHexIds: [inventionFirstHexId, hexId] },
+        });
+        setInventionFirstHexId(null);
+        setActiveProgressCardId(null);
+        setBuildMode('none');
+      }
     }
   };
 
@@ -454,16 +724,27 @@ export const Board: React.FC<BoardProps> = React.memo(({ state, myPlayerId }) =>
             const pointsStr = corners.map((p) => `${p.x},${p.y}`).join(' ');
 
             const isRobberTarget =
-              state.phase === 'ROBBER_PLACEMENT' &&
-              isRobberController &&
-              (!state.turnDeadlineMs || Date.now() < state.turnDeadlineMs) &&
-              tile.id !== state.board.robberHexId;
+              ((state.phase === 'ROBBER_PLACEMENT' &&
+                isRobberController &&
+                (!state.turnDeadlineMs || Date.now() < state.turnDeadlineMs)) ||
+                (isMyTurn && activeBuildMode === 'chase_robber' && selectedKnightVertexId) ||
+                (isMyTurn && activeBuildMode === 'taxation' && activeProgressCardId)) &&
+              isValidRobberHex(state as any, tile.id, myPlayerId || undefined);
+
+            const isMerchantTarget =
+              isMyTurn && activeBuildMode === 'merchant' && isHexLegalForMerchant(tile.id);
+
+            const isInventionTarget =
+              isMyTurn && activeBuildMode === 'invention' && isHexLegalForInvention(tile.id);
+            const isInventionSelected = inventionFirstHexId === tile.id;
+
+            const isClickableHex = isRobberTarget || isMerchantTarget || isInventionTarget;
 
             return (
               <g
                 key={tile.id}
                 onClick={() => handleHexClick(tile.id)}
-                className={`transition-all duration-200 ${isRobberTarget ? 'cursor-pointer hover:opacity-95' : ''}`}
+                className={`transition-all duration-200 ${isClickableHex ? 'cursor-pointer hover:opacity-95' : ''}`}
               >
                 <polygon
                   points={pointsStr}
@@ -495,19 +776,48 @@ export const Board: React.FC<BoardProps> = React.memo(({ state, myPlayerId }) =>
                     className="animate-pulse"
                   />
                 )}
+
+                {isMerchantTarget && (
+                  <circle
+                    cx={center.x}
+                    cy={center.y}
+                    r={HEX_RADIUS * 0.6}
+                    fill="rgba(234, 179, 8, 0.30)"
+                    stroke="#facc15"
+                    strokeWidth="3.5"
+                    strokeDasharray="6 4"
+                    className="animate-pulse"
+                  />
+                )}
+
+                {isInventionTarget && (
+                  <circle
+                    cx={center.x}
+                    cy={center.y}
+                    r={HEX_RADIUS * 0.56}
+                    fill={isInventionSelected ? 'rgba(34, 197, 94, 0.4)' : 'rgba(56, 189, 248, 0.26)'}
+                    stroke={isInventionSelected ? '#22c55e' : '#38bdf8'}
+                    strokeWidth="3.5"
+                    strokeDasharray={isInventionSelected ? undefined : '6 4'}
+                    className="animate-pulse"
+                  />
+                )}
               </g>
             );
           })}
         </g>
 
-        {/* 3. Number Tokens & Robber Figurine */}
+        {/* 3. Number Tokens, Robber Figurine & Merchant Cone */}
         <g id="tokens-layer" className="pointer-events-none select-none">
           {Object.values(state.board.hexes).map((tile) => {
             const center = hexToPixel({ q: tile.q, r: tile.r, s: tile.s }, HEX_RADIUS);
             if (tile.terrain === 'desert' || !tile.number) return null;
 
             const isRedNumber = tile.number === 6 || tile.number === 8;
-            const pipsCount = NUMBER_PIPS[tile.number] || 1;
+            const isCombined212Token =
+              Boolean(state.settings?.houseRules?.combined2And12) &&
+              (tile.number === 2 || tile.number === 12);
+            const pipsCount = isCombined212Token ? 2 : NUMBER_PIPS[tile.number] || 1;
 
             return (
               <g key={`num-${tile.id}`} transform={`translate(${center.x}, ${center.y})`}>
@@ -517,12 +827,12 @@ export const Board: React.FC<BoardProps> = React.memo(({ state, myPlayerId }) =>
                 <text
                   textAnchor="middle"
                   dy="2"
-                  fontSize="15"
+                  fontSize={isCombined212Token ? '11.5' : '15'}
                   fontWeight="900"
-                  fill={isRedNumber ? '#dc2626' : '#1e293b'}
+                  fill={isRedNumber ? '#dc2626' : isCombined212Token ? '#7e22ce' : '#1e293b'}
                   fontFamily="sans-serif"
                 >
-                  {tile.number}
+                  {isCombined212Token ? '2/12' : tile.number}
                 </text>
 
                 <g transform="translate(0, 9)">
@@ -543,8 +853,9 @@ export const Board: React.FC<BoardProps> = React.memo(({ state, myPlayerId }) =>
             );
           })}
 
-          {/* Custom Robber Figurine */}
+          {/* Custom Robber Figurine (in C&K, only rendered once robberActive is true after 1st Barbarian Attack) */}
           {state.board.robberHexId &&
+            (!isCK || state.robberActive) &&
             (() => {
               const rHex = state.board.hexes[state.board.robberHexId];
               if (!rHex) return null;
@@ -567,6 +878,53 @@ export const Board: React.FC<BoardProps> = React.memo(({ state, myPlayerId }) =>
                 </g>
               );
             })()}
+
+          {/* Cities & Knights Merchant Cone Figurine */}
+          {isCK &&
+            state.merchant?.hexId &&
+            (() => {
+              const mHex = state.board.hexes[state.merchant.hexId];
+              if (!mHex) return null;
+              const mCenter = hexToPixel({ q: mHex.q, r: mHex.r, s: mHex.s }, HEX_RADIUS);
+              const owner = state.merchant.ownerId ? state.players[state.merchant.ownerId] : null;
+              const ownerColor = owner ? PLAYER_COLORS[owner.color].primary : '#a855f7';
+              return (
+                <g
+                  transform={`translate(${mCenter.x - 20}, ${mCenter.y + 8})`}
+                  filter="url(#piece-shadow)"
+                >
+                  {/* Gold-trimmed purple Merchant Cone */}
+                  <ellipse cx="0" cy="11" rx="11" ry="4.5" fill="#581c87" stroke="#facc15" strokeWidth="1.8" />
+                  <polygon
+                    points="0,-13 10,10 -10,10"
+                    fill="#7e22ce"
+                    stroke="#facc15"
+                    strokeWidth="1.8"
+                  />
+                  <circle cx="0" cy="-14" r="4.5" fill={ownerColor} stroke="#ffffff" strokeWidth="1.5" />
+                  <rect
+                    x="-14"
+                    y="12"
+                    width="28"
+                    height="10"
+                    rx="4"
+                    fill="#0f172a"
+                    stroke="#facc15"
+                    strokeWidth="1"
+                  />
+                  <text
+                    textAnchor="middle"
+                    y="19.5"
+                    fontSize="7"
+                    fontWeight="900"
+                    fill="#fef08a"
+                    fontFamily="sans-serif"
+                  >
+                    2:1 • 1VP
+                  </text>
+                </g>
+              );
+            })()}
         </g>
 
         {/* 4. Roads Layer */}
@@ -576,6 +934,9 @@ export const Board: React.FC<BoardProps> = React.memo(({ state, myPlayerId }) =>
             const v1 = state.board.vertices[edge.v1];
             const v2 = state.board.vertices[edge.v2];
             if (!v1 || !v2) return null;
+
+            const isDiplomacyTarget =
+              isMyTurn && activeBuildMode === 'diplomacy' && Boolean(road) && isOpenRoadEdge(state.board, edge.id);
 
             if (road) {
               const player = state.players[road.playerId];
@@ -594,6 +955,7 @@ export const Board: React.FC<BoardProps> = React.memo(({ state, myPlayerId }) =>
                   key={edge.id}
                   filter="url(#piece-shadow)"
                   className="cursor-pointer"
+                  onClick={() => isDiplomacyTarget && handleEdgeClick(edge.id)}
                   onMouseEnter={() =>
                     player &&
                     setHoveredPiece({
@@ -601,7 +963,7 @@ export const Board: React.FC<BoardProps> = React.memo(({ state, myPlayerId }) =>
                       y: edge.midY - 14,
                       playerName: player.name,
                       playerColor: player.color,
-                      pieceLabel: 'Road',
+                      pieceLabel: isDiplomacyTarget ? 'Open Road (Click for Diplomat)' : 'Road',
                     })
                   }
                   onMouseLeave={() => setHoveredPiece(null)}
@@ -621,8 +983,8 @@ export const Board: React.FC<BoardProps> = React.memo(({ state, myPlayerId }) =>
                     y1={y1}
                     x2={x2}
                     y2={y2}
-                    stroke={colorInfo.border}
-                    strokeWidth="11"
+                    stroke={isDiplomacyTarget ? '#fbbf24' : colorInfo.border}
+                    strokeWidth={isDiplomacyTarget ? '13' : '11'}
                     strokeLinecap="round"
                   />
                   <line
@@ -695,10 +1057,12 @@ export const Board: React.FC<BoardProps> = React.memo(({ state, myPlayerId }) =>
           })}
         </g>
 
-        {/* 5. Vertices Layer (Settlements, Cities, Build Spots) */}
+        {/* 5. Vertices Layer (Settlements, Cities, City Walls, Metropolises, Knights & Build Spots) */}
         <g id="vertices-layer">
           {Object.values(state.board.vertices).map((vertex) => {
             const building = state.board.buildings[vertex.id];
+            const knight = state.board.knights?.[vertex.id];
+
             const isCityUpgradable =
               isMyTurn &&
               activeBuildMode === 'city' &&
@@ -706,25 +1070,47 @@ export const Board: React.FC<BoardProps> = React.memo(({ state, myPlayerId }) =>
               building.type === 'settlement' &&
               building.playerId === myPlayerId;
 
+            const isCityWallUpgradable =
+              isMyTurn &&
+              activeBuildMode === 'city_wall' &&
+              building &&
+              building.type === 'city' &&
+              !building.hasWall &&
+              building.playerId === myPlayerId;
+
+            const isVulnerablePillageTarget =
+              isMyPillageTurn && vulnerableCityVertices.has(vertex.id);
+
             if (building) {
               const player = state.players[building.playerId];
               const colorInfo = player ? PLAYER_COLORS[player.color] : PLAYER_COLORS.red;
               const isJustPlacedInSetup = state.lastSetupVertexId === vertex.id;
+              const metroInfo = building.metropolis ? METROPOLIS_STYLES[building.metropolis] : null;
+
+              const pieceLabel =
+                building.type === 'city'
+                  ? metroInfo
+                    ? `${metroInfo.label}${building.hasWall ? ' + Wall' : ''}`
+                    : `City (2 VP)${building.hasWall ? ' + City Wall (+2 Cap)' : ''}`
+                  : 'Settlement (1 VP)';
 
               return (
                 <g
                   key={vertex.id}
                   transform={`translate(${vertex.x}, ${vertex.y})`}
                   filter="url(#piece-shadow)"
-                  onClick={() => isCityUpgradable && handleVertexClick(vertex.id)}
+                  onClick={() =>
+                    (isCityUpgradable || isCityWallUpgradable || isVulnerablePillageTarget) &&
+                    handleVertexClick(vertex.id)
+                  }
                   onMouseEnter={() =>
                     player &&
                     setHoveredPiece({
                       x: vertex.x,
-                      y: vertex.y - 20,
+                      y: vertex.y - 24,
                       playerName: player.name,
                       playerColor: player.color,
-                      pieceLabel: building.type === 'city' ? 'City (2 VP)' : 'Settlement (1 VP)',
+                      pieceLabel,
                     })
                   }
                   onMouseLeave={() => setHoveredPiece(null)}
@@ -740,6 +1126,33 @@ export const Board: React.FC<BoardProps> = React.memo(({ state, myPlayerId }) =>
                       className="animate-spin"
                     />
                   )}
+
+                  {/* City Wall Fortification Base underneath City */}
+                  {building.type === 'city' && building.hasWall && (
+                    <g>
+                      <rect
+                        x="-18"
+                        y="-18"
+                        width="36"
+                        height="36"
+                        rx="5"
+                        fill={colorInfo.secondary}
+                        stroke="#fde047"
+                        strokeWidth="2.5"
+                      />
+                      <rect
+                        x="-15"
+                        y="-15"
+                        width="30"
+                        height="30"
+                        rx="3"
+                        fill="#0f172a"
+                        stroke={colorInfo.border}
+                        strokeWidth="1.2"
+                      />
+                    </g>
+                  )}
+
                   {building.type === 'settlement' ? (
                     <g transform="translate(-11, -12)">
                       <polygon
@@ -761,13 +1174,210 @@ export const Board: React.FC<BoardProps> = React.memo(({ state, myPlayerId }) =>
                       <rect x="10" y="14" width="8" height="12" fill={colorInfo.door} />
                     </g>
                   )}
-                  {isCityUpgradable && (
-                    <circle r="17" fill="none" stroke="#22c55e" strokeWidth="3.5" className="animate-pulse" />
+
+                  {/* Golden Metropolis Arch & Discipline Badge above City */}
+                  {building.type === 'city' && metroInfo && (
+                    <g transform="translate(0, -21)">
+                      <path
+                        d="M-13,8 L-13,0 L-6,-7 L0,-11 L6,-7 L13,0 L13,8 Z"
+                        fill={metroInfo.fill}
+                        stroke={metroInfo.stroke}
+                        strokeWidth="2"
+                      />
+                      <circle cx="0" cy="-2" r="4" fill="#0f172a" stroke="#ffffff" strokeWidth="1" />
+                      <text
+                        textAnchor="middle"
+                        y="1"
+                        fontSize="6.5"
+                        fontWeight="900"
+                        fill={metroInfo.fill}
+                        fontFamily="sans-serif"
+                      >
+                        4VP
+                      </text>
+                    </g>
+                  )}
+
+                  {(isCityUpgradable || isCityWallUpgradable) && (
+                    <circle r="19" fill="none" stroke="#22c55e" strokeWidth="3.5" className="animate-pulse" />
+                  )}
+
+                  {isVulnerablePillageTarget && (
+                    <circle r="21" fill="rgba(239, 68, 68, 0.25)" stroke="#ef4444" strokeWidth="4" className="animate-pulse" />
                   )}
                 </g>
               );
             }
 
+            // Render Knight Piece on Vertex
+            if (knight) {
+              const player = state.players[knight.playerId];
+              const colorInfo = player ? PLAYER_COLORS[player.color] : PLAYER_COLORS.red;
+              const isSelectedKnight = selectedKnightVertexId === vertex.id;
+              const isDisplaceableTarget = reachableKnightMove.displaceableKnightVertices.has(vertex.id);
+              const isIntrigueTarget =
+                isMyTurn && activeBuildMode === 'intrigue' && isVertexLegalForIntrigue(vertex.id);
+              const isDeserterVictimChoice =
+                isMyDeserterVictimTurn && knight.playerId === myPlayerId;
+
+              const levelLabel =
+                knight.level === 1
+                  ? 'Basic Knight (Str 1)'
+                  : knight.level === 2
+                    ? 'Strong Knight (Str 2)'
+                    : 'Mighty Knight (Str 3)';
+              const statusLabel = knight.active ? 'Active ⚡' : 'Inactive 💤';
+
+              return (
+                <g
+                  key={vertex.id}
+                  transform={`translate(${vertex.x}, ${vertex.y})`}
+                  filter="url(#piece-shadow)"
+                  onClick={() => handleVertexClick(vertex.id)}
+                  onMouseEnter={() =>
+                    player &&
+                    setHoveredPiece({
+                      x: vertex.x,
+                      y: vertex.y - 24,
+                      playerName: player.name,
+                      playerColor: player.color,
+                      pieceLabel: `${levelLabel} • ${statusLabel}`,
+                    })
+                  }
+                  onMouseLeave={() => setHoveredPiece(null)}
+                  className="cursor-pointer"
+                >
+                  {/* Active Knight Glowing Aura */}
+                  {knight.active && (
+                    <circle
+                      r="17.5"
+                      fill="rgba(56, 189, 248, 0.22)"
+                      stroke="#fde047"
+                      strokeWidth="2.5"
+                      strokeDasharray="4 2"
+                    />
+                  )}
+
+                  {/* Selected Knight Ring */}
+                  {isSelectedKnight && (
+                    <circle
+                      r="20"
+                      fill="none"
+                      stroke="#22c55e"
+                      strokeWidth="3"
+                      className="animate-pulse"
+                    />
+                  )}
+
+                  {/* Displace / Intrigue / Deserter Target Ring */}
+                  {(isDisplaceableTarget || isIntrigueTarget || isDeserterVictimChoice) && (
+                    <circle
+                      r="21"
+                      fill="rgba(244, 63, 94, 0.28)"
+                      stroke="#f43f5e"
+                      strokeWidth="3.5"
+                      className="animate-pulse"
+                    />
+                  )}
+
+                  {/* Knight Token Body */}
+                  <circle
+                    r="13.5"
+                    fill={colorInfo.primary}
+                    stroke={knight.active ? '#fde047' : '#64748b'}
+                    strokeWidth={knight.active ? '3' : '2.2'}
+                    opacity={knight.active ? 1 : 0.78}
+                  />
+                  <circle
+                    r="10"
+                    fill="#0f172a"
+                    stroke={colorInfo.border}
+                    strokeWidth="1"
+                    opacity={knight.active ? 0.92 : 0.75}
+                  />
+
+                  {/* Helmet / Sword Icon + Strength Stars */}
+                  <text
+                    textAnchor="middle"
+                    y="-1"
+                    fontSize="10"
+                    fontWeight="900"
+                    fill={knight.active ? '#fde047' : '#94a3b8'}
+                    fontFamily="sans-serif"
+                  >
+                    {knight.active ? '⚔️' : '🛡️'}
+                  </text>
+                  <text
+                    textAnchor="middle"
+                    y="8.5"
+                    fontSize="7.5"
+                    fontWeight="900"
+                    fill={knight.active ? '#ffffff' : '#cbd5e1'}
+                    fontFamily="sans-serif"
+                  >
+                    {'★'.repeat(knight.level)}
+                  </text>
+                </g>
+              );
+            }
+
+            // Empty Vertex Interactive Targets:
+            // 1. Displaced Knight destination
+            if (isMyDisplacedKnightTurn && state.pendingDisplacedKnight?.validVertexIds.includes(vertex.id)) {
+              const isHovered = hoveredVertex === vertex.id;
+              return (
+                <g
+                  key={vertex.id}
+                  transform={`translate(${vertex.x}, ${vertex.y})`}
+                  onClick={() => handleVertexClick(vertex.id)}
+                  onMouseEnter={() => setHoveredVertex(vertex.id)}
+                  onMouseLeave={() => setHoveredVertex(null)}
+                  className="cursor-pointer"
+                >
+                  <circle r="16" fill="transparent" />
+                  <circle
+                    r={isHovered ? 13 : 9}
+                    fill="#f59e0b"
+                    stroke="#ffffff"
+                    strokeWidth="2.5"
+                    className="animate-pulse"
+                  />
+                </g>
+              );
+            }
+
+            // 2. Deserter placement or Recruit Knight or Move Knight destination
+            const isKnightRecruitSpot =
+              myPlayerId &&
+              ((isMyTurn && activeBuildMode === 'knight') || isMyDeserterPlaceTurn) &&
+              isValidKnightRecruitVertex(state.board, myPlayerId, vertex.id);
+
+            const isKnightMoveSpot = reachableKnightMove.emptyVertices.has(vertex.id);
+
+            if (isKnightRecruitSpot || isKnightMoveSpot) {
+              const isHovered = hoveredVertex === vertex.id;
+              return (
+                <g
+                  key={vertex.id}
+                  transform={`translate(${vertex.x}, ${vertex.y})`}
+                  onClick={() => handleVertexClick(vertex.id)}
+                  onMouseEnter={() => setHoveredVertex(vertex.id)}
+                  onMouseLeave={() => setHoveredVertex(null)}
+                  className="cursor-pointer"
+                >
+                  <circle r="16" fill="transparent" />
+                  <circle
+                    r={isHovered ? 13 : 9}
+                    fill={isHovered ? '#fbbf24' : '#a855f7'}
+                    stroke="#ffffff"
+                    strokeWidth="2.5"
+                    className="transition-all animate-pulse"
+                  />
+                </g>
+              );
+            }
+
+            // 3. Settlement / Setup City placement
             if (isPlacingSettlement) {
               const isLegal = isVertexLegalForSettlement(vertex.id);
               const isHovered = hoveredVertex === vertex.id;
@@ -804,7 +1414,7 @@ export const Board: React.FC<BoardProps> = React.memo(({ state, myPlayerId }) =>
           })}
         </g>
 
-        {/* 6. Floating SVG Tooltip when hovering any Road, Settlement, or City */}
+        {/* 6. Floating SVG Tooltip when hovering any Road, Settlement, City, or Knight */}
         {hoveredPiece && (
           <g
             transform={`translate(${hoveredPiece.x}, ${hoveredPiece.y})`}
@@ -812,9 +1422,9 @@ export const Board: React.FC<BoardProps> = React.memo(({ state, myPlayerId }) =>
             filter="url(#piece-shadow)"
           >
             <rect
-              x="-75"
+              x="-95"
               y="-28"
-              width="150"
+              width="190"
               height="24"
               rx="8"
               fill="#0f172a"
@@ -822,7 +1432,7 @@ export const Board: React.FC<BoardProps> = React.memo(({ state, myPlayerId }) =>
               strokeWidth="2"
             />
             <circle
-              cx="-61"
+              cx="-81"
               cy="-16"
               r="5"
               fill={PLAYER_COLORS[hoveredPiece.playerColor].primary}
@@ -833,7 +1443,7 @@ export const Board: React.FC<BoardProps> = React.memo(({ state, myPlayerId }) =>
               x="4"
               y="-12.5"
               textAnchor="middle"
-              fontSize="9.5"
+              fontSize="9"
               fontWeight="800"
               fill="#f8fafc"
               fontFamily="sans-serif"

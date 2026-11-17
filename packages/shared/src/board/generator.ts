@@ -137,6 +137,121 @@ export function get56HexCoords(): CubeCoord[] {
   return coords;
 }
 
+const GREEN_2_1_HARBOR_TYPES = new Set<HarborType>(['wheat_2_1', 'wood_2_1', 'sheep_2_1']);
+
+/**
+ * Checks whether two harbor types are forbidden from being placed next to each other
+ * around the perimeter of the island:
+ * 1. No two 3:1 ports ('generic_3_1') may be adjacent.
+ * 2. No two 2:1 ports for wheat, wood, and sheep ('wheat_2_1', 'wood_2_1', 'sheep_2_1') may be adjacent.
+ */
+export function areHarborsIncompatibleAdjacent(a: HarborType, b: HarborType): boolean {
+  if (a === 'generic_3_1' && b === 'generic_3_1') {
+    return true;
+  }
+  if (GREEN_2_1_HARBOR_TYPES.has(a) && GREEN_2_1_HARBOR_TYPES.has(b)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Checks whether a cyclic sequence of HarborTypes (or a BoardState's harbors Record)
+ * has any adjacent 3:1 ports or any adjacent wheat/wood/sheep 2:1 ports around the coast.
+ */
+export function hasInvalidHarborAdjacency(
+  harborsOrTypes: Record<string, Harbor> | HarborType[],
+  edges?: Record<string, EdgeCoordinate>,
+): boolean {
+  let orderedTypes: HarborType[];
+
+  if (Array.isArray(harborsOrTypes)) {
+    orderedTypes = harborsOrTypes;
+  } else {
+    const harborList = Object.values(harborsOrTypes);
+    if (harborList.length <= 1) return false;
+    if (edges) {
+      orderedTypes = [...harborList]
+        .sort((h1, h2) => {
+          const e1 = edges[h1.edgeId];
+          const e2 = edges[h2.edgeId];
+          const a1 = e1 ? Math.atan2(e1.midY, e1.midX) : 0;
+          const a2 = e2 ? Math.atan2(e2.midY, e2.midX) : 0;
+          return a1 - a2;
+        })
+        .map((h) => h.type);
+    } else {
+      orderedTypes = [...harborList]
+        .sort((h1, h2) => {
+          const idx1 = Number(h1.id.replace('harbor_', '')) || 0;
+          const idx2 = Number(h2.id.replace('harbor_', '')) || 0;
+          return idx1 - idx2;
+        })
+        .map((h) => h.type);
+    }
+  }
+
+  const n = orderedTypes.length;
+  if (n <= 1) return false;
+
+  for (let i = 0; i < n; i++) {
+    const curr = orderedTypes[i];
+    const next = orderedTypes[(i + 1) % n];
+    if (areHarborsIncompatibleAdjacent(curr, next)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Generates a randomized cyclic ordering of harbors that strictly satisfies:
+ * - No two 3:1 ports are adjacent (including wrap-around between last and first)
+ * - No two 2:1 ports for wheat, wood, and sheep are adjacent (including wrap-around)
+ */
+function arrangeValidHarbors(pool: HarborType[]): HarborType[] {
+  // Fast uniform rejection sampling first
+  for (let attempt = 0; attempt < 250; attempt++) {
+    const candidate = shuffle(pool);
+    if (!hasInvalidHarborAdjacency(candidate)) {
+      return candidate;
+    }
+  }
+
+  // Guaranteed randomized backtracking solver
+  const shuffledPool = shuffle(pool);
+  const used = new Array<boolean>(shuffledPool.length).fill(false);
+  const result: HarborType[] = [];
+
+  function backtrack(): boolean {
+    if (result.length === shuffledPool.length) {
+      return !areHarborsIncompatibleAdjacent(result[result.length - 1], result[0]);
+    }
+
+    for (let i = 0; i < shuffledPool.length; i++) {
+      if (used[i]) continue;
+      const candidateType = shuffledPool[i];
+      if (
+        result.length > 0 &&
+        areHarborsIncompatibleAdjacent(result[result.length - 1], candidateType)
+      ) {
+        continue;
+      }
+      used[i] = true;
+      result.push(candidateType);
+      if (backtrack()) return true;
+      result.pop();
+      used[i] = false;
+    }
+    return false;
+  }
+
+  if (backtrack()) {
+    return result;
+  }
+  return shuffledPool;
+}
+
 /**
  * Checks whether any two adjacent hexes both have red number tokens (6 or 8).
  */
@@ -385,11 +500,13 @@ export function generateBoard(is5to6Player = false): BoardState {
   // Sort coastal edges clockwise around the island perimeter
   coastalEdges.sort((a, b) => a.angle - b.angle);
 
-  // Distribute harbors evenly around the perimeter so they never clump
+  // Distribute harbors evenly around the perimeter so they never clump,
+  // while guaranteeing no two 3:1 ports are adjacent and no two wheat/wood/sheep 2:1 ports are adjacent
   const harbors: Record<string, Harbor> = {};
-  const harborTypes = shuffle(
-    is5to6Player ? [...BASE_HARBORS, 'generic_3_1', 'sheep_2_1'] : [...BASE_HARBORS],
-  );
+  const rawHarborPool: HarborType[] = is5to6Player
+    ? [...BASE_HARBORS, 'generic_3_1', 'sheep_2_1']
+    : [...BASE_HARBORS];
+  const harborTypes = arrangeValidHarbors(rawHarborPool);
 
   for (let i = 0; i < harborTypes.length; i++) {
     const edgeIndex = Math.floor((i * coastalEdges.length) / harborTypes.length);

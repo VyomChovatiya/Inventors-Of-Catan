@@ -74,7 +74,8 @@ app.get('/api/auth/google', (req, res) => {
   const isSecure =
     req.secure ||
     (req.headers['x-forwarded-proto'] as string)?.includes('https') ||
-    (req.headers.host || '').includes('ngrok');
+    (req.headers.host || '').includes('ngrok') ||
+    (req.headers.host || '').includes('dpdns.org');
 
   const cookiesToSet: string[] = [
     `${OAUTH_STATE_COOKIE_NAME}=${state}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600${isSecure ? '; Secure' : ''}`,
@@ -184,7 +185,8 @@ app.get('/api/auth/google/callback', async (req, res) => {
     const isSecure =
       req.secure ||
       (req.headers['x-forwarded-proto'] as string)?.includes('https') ||
-      (req.headers.host || '').includes('ngrok');
+      (req.headers.host || '').includes('ngrok') ||
+      (req.headers.host || '').includes('dpdns.org');
 
     const maxAgeSec = 14 * 24 * 60 * 60;
     res.setHeader('Set-Cookie', [
@@ -301,6 +303,7 @@ io.on('connection', (socket) => {
       {
         hostName,
         hostColor,
+        expansion,
         is5to6Player,
         victoryPointsToWin,
         timerSettings,
@@ -328,6 +331,7 @@ io.on('connection', (socket) => {
           timerSettings,
           houseRules,
           previewBoard,
+          expansion,
         );
         player.socketId = socket.id;
         socket.join(room.code);

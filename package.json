@@ -7,6 +7,7 @@
     "dev": "pnpm --parallel --filter \"./packages/*\" dev",
     "dev:server": "pnpm --filter @catan/server dev",
     "dev:client": "pnpm --filter @catan/client dev",
+    "tunnel:cloudflare": "cloudflared tunnel run --url http://localhost:5173 catan",
     "tunnel:ngrok": "ngrok http 5173",
     "tunnel:tailscale": "tailscale funnel 5173",
     "build": "pnpm --recursive run build",
